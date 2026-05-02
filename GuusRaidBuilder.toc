@@ -1,0 +1,13 @@
+﻿## Interface: 11403
+## Title: GuusRaidBuilder
+## Notes: Build and execute raid compositions with .z addinvite commands
+## Author: Guus
+## Version: 1.0
+## SavedVariables: GuusRaidBuilder_Config
+
+libs/LibStub.lua
+libs/CallbackHandler-1.0.lua
+libs/LibDataBroker-1.1.lua
+libs/LibDBIcon-1.0.lua
+
+GuusRaidBuilder.lua
