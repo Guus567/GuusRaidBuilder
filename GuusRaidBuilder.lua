@@ -157,7 +157,7 @@ local ROLE_BG = {
 -- ============================================================
 
 local ROW_HEIGHT   = 26
-local LEFT_WIDTH   = 155
+local LEFT_WIDTH   = 200
 local RIGHT_WIDTH  = 590
 local WINDOW_WIDTH = LEFT_WIDTH + RIGHT_WIDTH + 42
 local WINDOW_HEIGHT = 590
@@ -998,7 +998,7 @@ RefreshLeftPanel = function()
         local accClass = GuusRaidBuilder_Config.accountClasses and GuusRaidBuilder_Config.accountClasses[accName]
         local accClassColor = accClass and GRB_CLASS_COLORS[accClass] or {0.9, 0.9, 1.0}
         nameTxt:SetTextColor(accClassColor[1], accClassColor[2], accClassColor[3])
-        nameTxt:SetWidth(55)
+        nameTxt:SetWidth(80)
 
         -- [L] Legacy assign button
         local presetName2 = GuusRaidBuilder_Config.currentPreset
@@ -1008,7 +1008,7 @@ RefreshLeftPanel = function()
         local lBtn = CreateFrame("Button", "GRBLegacy" .. i, row)
         lBtn:SetWidth(20)
         lBtn:SetHeight(ROW_HEIGHT - 6)
-        lBtn:SetPoint("LEFT", row, "LEFT", 88, 0)
+        lBtn:SetPoint("RIGHT", row, "RIGHT", -47, 0)
         lBtn:SetBackdrop({
             bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -1127,7 +1127,7 @@ RefreshLeftPanel = function()
         table.insert(GRBLeftRows, fBtn)
 
         local badge = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        badge:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        badge:SetPoint("RIGHT", row, "RIGHT", -26, 0)
         if count > 0 then
             badge:SetText("[" .. count .. "]")
             badge:SetTextColor(0.3, 1.0, 0.4)
@@ -1135,6 +1135,53 @@ RefreshLeftPanel = function()
             badge:SetText("[0]")
             badge:SetTextColor(0.45, 0.45, 0.45)
         end
+
+        -- [X] Delete account button
+        local capturedAccDel = accName
+        local delBtn = CreateFrame("Button", "GRBDelAcc" .. i, row)
+        delBtn:SetWidth(18)
+        delBtn:SetHeight(ROW_HEIGHT - 6)
+        delBtn:SetPoint("RIGHT", row, "RIGHT", -3, 0)
+        delBtn:SetBackdrop({
+            bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 8,
+            insets = { left = 1, right = 1, top = 1, bottom = 1 }
+        })
+        delBtn:SetBackdropColor(0.30, 0.05, 0.05, 0.9)
+        delBtn:SetBackdropBorderColor(0.70, 0.20, 0.20, 0.8)
+        local delTxt = delBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        delTxt:SetPoint("CENTER", delBtn, "CENTER", 0, 0)
+        delTxt:SetText("X")
+        delTxt:SetTextColor(1.0, 0.35, 0.35)
+        delBtn:SetScript("OnEnter", function()
+            delBtn:SetBackdropColor(0.50, 0.08, 0.08, 0.95)
+            GameTooltip:SetOwner(delBtn, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Remove account", 1, 0.3, 0.3)
+            GameTooltip:AddLine("Removes '" .. capturedAccDel .. "' from the account list.", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("Does NOT delete any slots from presets.", 0.6, 0.6, 0.6)
+            GameTooltip:Show()
+        end)
+        delBtn:SetScript("OnLeave", function()
+            delBtn:SetBackdropColor(0.30, 0.05, 0.05, 0.9)
+            GameTooltip:Hide()
+        end)
+        delBtn:SetScript("OnClick", function()
+            EnsureConfig()
+            local accs = GuusRaidBuilder_Config.accounts
+            for ai2 = 1, table.getn(accs) do
+                if accs[ai2] == capturedAccDel then
+                    table.remove(accs, ai2)
+                    break
+                end
+            end
+            -- Also remove stored faction/class/classAuto for this account
+            if GuusRaidBuilder_Config.accountFactions  then GuusRaidBuilder_Config.accountFactions[capturedAccDel]  = nil end
+            if GuusRaidBuilder_Config.accountClasses   then GuusRaidBuilder_Config.accountClasses[capturedAccDel]   = nil end
+            if GuusRaidBuilder_Config.accountClassAuto then GuusRaidBuilder_Config.accountClassAuto[capturedAccDel] = nil end
+            RefreshLeftPanel()
+        end)
+        table.insert(GRBLeftRows, delBtn)
 
         -- Click: add a slot for this account, then jump right panel to their group
         local capturedAcc = accName
