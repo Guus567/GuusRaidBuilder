@@ -594,7 +594,7 @@ local function BuildExportText(presetName)
             lastAcc = nil
         elseif soi > 5 and math.mod(soi - 5, 5) == 0 then
             -- Groups 3+ start at soi == 10, 15, 20 ...
-            local groupNum = math.floor((soi - 5) / 5) + 3
+            local groupNum = math.floor((soi - 5) / 5) + 2
             table.insert(lines, "")
             table.insert(lines, "    -- == Group " .. groupNum .. "  (spawn " .. soi .. "-" .. math.min(soi + 4, spawnTotal) .. ") ==")
             lastAcc = nil
@@ -1680,7 +1680,7 @@ RefreshRightPanel = function()
                 yOffset = yOffset - 19
             elseif soi > 5 and math.mod(soi - 5, 5) == 0 then
                 -- groups 3, 4, 5... each 5 slots starting at soi=10, 15...
-                local groupNum = math.floor((soi - 5) / 5) + 3
+                local groupNum = math.floor((soi - 5) / 5) + 2
                 local div = CreateFrame("Frame", nil, rightScrollContent)
                 div:SetWidth(RIGHT_WIDTH - 22) ; div:SetHeight(17)
                 div:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
