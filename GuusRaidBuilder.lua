@@ -1498,10 +1498,12 @@ RefreshRightPanel = function()
         specBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[5], -2)
 
         local fillerLbl = lrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        fillerLbl:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[6] + 2, -6)
-        fillerLbl:SetWidth(COL_W[6] + COL_W[7] - 2)
-        fillerLbl:SetText("legacy")
-        fillerLbl:SetTextColor(0.45, 0.25, 0.60)
+        fillerLbl:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[3] + 2, -6)
+        fillerLbl:SetWidth(COL_X[4] - COL_X[3] - 4)
+        local displayClass = string.upper(string.sub(charClass, 1, 1)) .. string.sub(charClass, 2)
+        local cc = GRB_CLASS_COLORS[displayClass] or {0.70, 0.50, 0.90}
+        fillerLbl:SetText(displayClass)
+        fillerLbl:SetTextColor(cc[1], cc[2], cc[3])
 
         local lremBtn = CreateFrame("Button", "GRBLegacyRem"..ai, lrow)
         lremBtn:SetWidth(COL_W[8]) ; lremBtn:SetHeight(ROW_HEIGHT - 4)
