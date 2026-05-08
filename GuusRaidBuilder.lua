@@ -1761,8 +1761,58 @@ RefreshRightPanel = function()
             end
         end
 
+    elseif GRB_sortKey then
+        -- ---- SORTED MODE: bots + legacy interleaved, sorted by key ----
+        local combined = {}
+        for di = 1, table.getn(displayOrder) do
+            table.insert(combined, { kind = "bot", idx = displayOrder[di] })
+        end
+        for ai = 1, table.getn(accounts) do
+            local acc = accounts[ai]
+            local ls  = legacySlots[acc]
+            if ls and ls.charName and ls.charName ~= "" then
+                table.insert(combined, { kind = "legacy", acc = acc, ai = ai })
+            end
+        end
+        local sk = GRB_sortKey
+        local sd = GRB_sortDir
+        local function getSortVal(item)
+            if item.kind == "bot" then
+                return string.lower(tostring(slots[item.idx][sk] or ""))
+            else
+                local ls = legacySlots[item.acc]
+                if sk == "class" then
+                    local cls = (GuusRaidBuilder_Config.accountClasses and GuusRaidBuilder_Config.accountClasses[item.acc])
+                               or GetLegacyCharClass(ls.charName) or ""
+                    return string.lower(cls)
+                elseif sk == "role"    then return string.lower(ls.role or "")
+                elseif sk == "spec"    then return string.lower(ls.spec or "")
+                elseif sk == "account" then return string.lower(item.acc or "")
+                else return ""
+                end
+            end
+        end
+        table.sort(combined, function(a, b)
+            local va = getSortVal(a)
+            local vb = getSortVal(b)
+            if sd == "asc" then return va < vb else return va > vb end
+        end)
+        for ci = 1, table.getn(combined) do
+            local item = combined[ci]
+            if item.kind == "bot" then
+                local slot = slots[item.idx]
+                local spawnToken = "b:" .. (slot.uid or 0)
+                local spawnPos   = tokenToPos[spawnToken] or item.idx
+                RenderBotRow(slot, item.idx, spawnToken, spawnPos)
+            else
+                local lSpawnToken = "l:" .. item.acc
+                local lSpawnPos   = tokenToPos[lSpawnToken] or item.ai
+                RenderLegacyRow(item.acc, legacySlots[item.acc], item.ai, lSpawnToken, lSpawnPos)
+            end
+        end
+
     else
-        -- ---- NORMAL MODE: bots by account dividers, then legacy at bottom ----
+        -- ---- NO SORT: bots grouped by account dividers, legacy at bottom ----
         local totalSlots = table.getn(displayOrder)
         for di = 1, totalSlots do
             local i    = displayOrder[di]
