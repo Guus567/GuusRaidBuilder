@@ -327,6 +327,17 @@ local function BuildLegacyCommand(ls)
     return cmd
 end
 
+-- Returns total raiders: 1 (you) + bots + assigned legacy chars
+local function GetPresetTotalCount(presetName)
+    local botCount = table.getn(GetPresetSlots(presetName))
+    local legacyCount = 0
+    local ls = GetPresetLegacySlots(presetName)
+    for _, v in pairs(ls) do
+        if v and v.charName and v.charName ~= "" then legacyCount = legacyCount + 1 end
+    end
+    return 1 + botCount + legacyCount  -- 1 = yourself
+end
+
 -- Get class of a legacy character by name (searches GuusLegacyManager)
 local function GetLegacyCharClass(charName)
     if not GuusLegacyManager then return nil end
@@ -581,7 +592,7 @@ local function BuildExportText(presetName)
     local lines   = {}
     local lastAcc = nil
     table.insert(lines, '["' .. presetName .. '"] = {')
-    table.insert(lines, "    -- == Group 1  (you + spawn 1-4) ==")
+    table.insert(lines, "    -- == Group 1  (you + spawn 2-5) ==")
 
     for soi = 1, spawnTotal do
         local token = spawnOrder[soi]
@@ -590,13 +601,13 @@ local function BuildExportText(presetName)
         if soi > 1 and soi <= 5 and math.mod(soi - 1, 4) == 0 then
             -- Group 2 starts at soi == 5
             table.insert(lines, "")
-            table.insert(lines, "    -- == Group 2  (spawn " .. soi .. "-" .. math.min(soi + 4, spawnTotal) .. ") ==")
+            table.insert(lines, "    -- == Group 2  (spawn " .. (soi + 1) .. "-" .. math.min(soi + 5, spawnTotal + 1) .. ") ==")
             lastAcc = nil
         elseif soi > 5 and math.mod(soi - 5, 5) == 0 then
             -- Groups 3+ start at soi == 10, 15, 20 ...
             local groupNum = math.floor((soi - 5) / 5) + 2
             table.insert(lines, "")
-            table.insert(lines, "    -- == Group " .. groupNum .. "  (spawn " .. soi .. "-" .. math.min(soi + 4, spawnTotal) .. ") ==")
+            table.insert(lines, "    -- == Group " .. groupNum .. "  (spawn " .. (soi + 1) .. "-" .. math.min(soi + 5, spawnTotal + 1) .. ") ==")
             lastAcc = nil
         end
 
@@ -905,16 +916,15 @@ RefreshSummary = function()
             legacyCount = legacyCount + 1
         end
     end
-    local legacyStr = legacyCount > 0
-        and ("  |cffaa55ff+" .. legacyCount .. " legacy|r")
-        or ""
+    local combined = s.total + legacyCount
+    local totalColor = combined > 40 and "|cffff2222" or "|cffffffff"
     summaryText:SetText(
         "|cffff6666Tanks: "   .. s.tank   .. "|r  "
         .. "|cff66ff66Healers: " .. s.healer .. "|r  "
         .. "|cff6699ffRDPS: "    .. s.rdps   .. "|r  "
         .. "|cffffff66MDPS: "    .. s.mdps   .. "|r  "
-        .. "|cffffffffTotal: "   .. s.total  .. "/40|r"
-        .. legacyStr
+        .. totalColor .. "Total: " .. combined .. "/40|r"
+        .. (legacyCount > 0 and ("  |cffaa55ff(bots:" .. s.total .. " +leg:" .. legacyCount .. ")|r") or "")
     )
 end
 
@@ -1191,6 +1201,10 @@ RefreshLeftPanel = function()
                 return
             end
             local slots = GuusRaidBuilder_Config.presets[presetName].slots
+            if GetPresetTotalCount(presetName) >= 40 then
+                DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r Raid is full (40/40).")
+                return
+            end
             local count = 0
             for si = 1, table.getn(slots) do
                 if slots[si].account == capturedAcc then count = count + 1 end
@@ -1519,7 +1533,7 @@ RefreshRightPanel = function()
         -- Spawn badge + up/down
         local lBadge = lrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         lBadge:SetPoint("TOPLEFT", lrow, "TOPLEFT", 420, -6) ; lBadge:SetWidth(28)
-        lBadge:SetText(tostring(lSpawnPos)) ; lBadge:SetTextColor(0.80, 0.50, 1.0)
+        lBadge:SetText(tostring(lSpawnPos + 1)) ; lBadge:SetTextColor(0.80, 0.50, 1.0)
         local lupBtn = CreateFrame("Button", nil, lrow)
         lupBtn:SetWidth(18) ; lupBtn:SetHeight(ROW_HEIGHT - 4)
         lupBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", 450, -2)
@@ -1632,7 +1646,7 @@ RefreshRightPanel = function()
         -- Spawn badge + up/down
         local spawnBadge = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         spawnBadge:SetPoint("TOPLEFT", row, "TOPLEFT", 420, -6) ; spawnBadge:SetWidth(28)
-        spawnBadge:SetText(tostring(spawnPos)) ; spawnBadge:SetTextColor(1.0, 0.9, 0.35)
+        spawnBadge:SetText(tostring(spawnPos + 1)) ; spawnBadge:SetTextColor(1.0, 0.9, 0.35)
         local upBtn = CreateFrame("Button", nil, row)
         upBtn:SetWidth(18) ; upBtn:SetHeight(ROW_HEIGHT - 4)
         upBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 450, -2)
@@ -1685,7 +1699,7 @@ RefreshRightPanel = function()
         g1Div:SetBackdropColor(0.05, 0.12, 0.05, 0.97) ; g1Div:SetBackdropBorderColor(0.30, 0.55, 0.30, 0.70)
         local g1Txt = g1Div:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         g1Txt:SetPoint("LEFT", g1Div, "LEFT", 6, 0)
-        g1Txt:SetText("Group 1  (you + spawn 1-4)")
+        g1Txt:SetText("Group 1  (you + spawn 2-5)")
         g1Txt:SetTextColor(0.50, 1.0, 0.50)
         table.insert(GRBRightRows, g1Div)
         yOffset = yOffset - 19
@@ -1723,7 +1737,7 @@ RefreshRightPanel = function()
                 div:SetBackdropColor(0.05, 0.12, 0.05, 0.97) ; div:SetBackdropBorderColor(0.30, 0.55, 0.30, 0.70)
                 local divTxt = div:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
                 divTxt:SetPoint("LEFT", div, "LEFT", 6, 0)
-                divTxt:SetText("Group " .. groupNum .. "  (spawn " .. soi .. "-" .. math.min(soi + 4, spawnTotal) .. ")")
+                divTxt:SetText("Group " .. groupNum .. "  (spawn " .. (soi + 1) .. "-" .. math.min(soi + 5, spawnTotal + 1) .. ")")
                 divTxt:SetTextColor(0.50, 1.0, 0.50)
                 table.insert(GRBRightRows, div)
                 yOffset = yOffset - 19
@@ -1737,7 +1751,7 @@ RefreshRightPanel = function()
                 div:SetBackdropColor(0.05, 0.12, 0.05, 0.97) ; div:SetBackdropBorderColor(0.30, 0.55, 0.30, 0.70)
                 local divTxt = div:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
                 divTxt:SetPoint("LEFT", div, "LEFT", 6, 0)
-                divTxt:SetText("Group " .. groupNum .. "  (spawn " .. soi .. "-" .. math.min(soi + 4, spawnTotal) .. ")")
+                divTxt:SetText("Group " .. groupNum .. "  (spawn " .. (soi + 1) .. "-" .. math.min(soi + 5, spawnTotal + 1) .. ")")
                 divTxt:SetTextColor(0.50, 1.0, 0.50)
                 table.insert(GRBRightRows, div)
                 yOffset = yOffset - 19
@@ -1889,6 +1903,10 @@ RefreshRightPanel = function()
 
         local capturedAcc = accName
         ab:SetScript("OnClick", function()
+            if GetPresetTotalCount(presetName) >= 40 then
+                DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r Raid is full (40/40).")
+                return
+            end
             local count = 0
             for si = 1, table.getn(slots) do
                 if slots[si].account == capturedAcc then count = count + 1 end
@@ -2323,6 +2341,14 @@ local function GRB_DoAssignLegacy(role, spec)
         end
     end
     local ls = GetPresetLegacySlots(preset)
+    -- Check if this is a new legacy (not already assigned) and raid is full
+    if not (ls[acc] and ls[acc].charName and ls[acc].charName ~= "") then
+        if GetPresetTotalCount(preset) >= 40 then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r Raid is full (40/40).")
+            if GRB_LegacyPopupFrame then GRB_LegacyPopupFrame:Hide() end
+            return
+        end
+    end
     ls[acc] = { charName = acc, role = role, spec = (spec == "default" and "" or spec) }
     if GRB_LegacyPopupFrame then GRB_LegacyPopupFrame:Hide() end
     RefreshAll()
