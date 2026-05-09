@@ -74,6 +74,30 @@ local function GetAccountFaction(accountName)
     return nil
 end
 
+-- Case-insensitive class lookup
+local function GetAccountClass(accountName)
+    local c = GuusRaidBuilder_Config.accountClasses
+    if not c then return nil end
+    if c[accountName] then return c[accountName] end
+    local lname = string.lower(accountName or "")
+    for k, v in pairs(c) do
+        if string.lower(k) == lname then return v end
+    end
+    return nil
+end
+
+-- Case-insensitive accountClassAuto lookup
+local function GetAccountClassAuto(accountName)
+    local a = GuusRaidBuilder_Config.accountClassAuto
+    if not a then return nil end
+    if a[accountName] then return a[accountName] end
+    local lname = string.lower(accountName or "")
+    for k, v in pairs(a) do
+        if string.lower(k) == lname then return v end
+    end
+    return nil
+end
+
 -- Returns races valid for the given account faction, optionally filtered by class
 local function GetRacesForAccount(accountName, class)
     local faction = GetAccountFaction(accountName)
@@ -1040,7 +1064,7 @@ RefreshLeftPanel = function()
         local nameTxt = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         nameTxt:SetPoint("LEFT", row, "LEFT", 30, 0)
         nameTxt:SetText(accName)
-        local accClass = GuusRaidBuilder_Config.accountClasses and GuusRaidBuilder_Config.accountClasses[accName]
+        local accClass = GetAccountClass(accName)
         local accClassColor = accClass and GRB_CLASS_COLORS[accClass] or {0.9, 0.9, 1.0}
         nameTxt:SetTextColor(accClassColor[1], accClassColor[2], accClassColor[3])
         nameTxt:SetWidth(80)
@@ -2407,8 +2431,8 @@ OpenLegacyPicker = function(accountName, presetName)
     GRB_LegacyPopupAcc    = accountName
     GRB_LegacyPopupPreset = presetName
 
-    local savedClass  = GuusRaidBuilder_Config.accountClasses and GuusRaidBuilder_Config.accountClasses[accountName]
-    local isAutoClass = GuusRaidBuilder_Config.accountClassAuto and GuusRaidBuilder_Config.accountClassAuto[accountName]
+    local savedClass  = GetAccountClass(accountName)
+    local isAutoClass = GetAccountClassAuto(accountName)
     local existing    = presetName and GetPresetLegacySlots(presetName)[accountName]
 
     -- Faction-filtered class list, capitalized for display
