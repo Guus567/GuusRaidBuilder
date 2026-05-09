@@ -62,14 +62,28 @@ local function GetClassRoles(class)
     return CLASS_ROLES[string.lower(class or "")] or ROLES
 end
 
+-- Case-insensitive faction lookup (handles "aguus" vs "Aguus" mismatch)
+local function GetAccountFaction(accountName)
+    local f = GuusRaidBuilder_Config.accountFactions
+    if not f then return nil end
+    if f[accountName] then return f[accountName] end
+    local lname = string.lower(accountName or "")
+    for k, v in pairs(f) do
+        if string.lower(k) == lname then return v end
+    end
+    return nil
+end
+
 -- Returns races valid for the given account faction, optionally filtered by class
 local function GetRacesForAccount(accountName, class)
-    local f = GuusRaidBuilder_Config.accountFactions
+    local faction = GetAccountFaction(accountName)
     local factionRaces
-    if f and f[accountName] == "Alliance" then
+    if faction == "Alliance" then
         factionRaces = ALLIANCE_RACES
-    else
+    elseif faction == "Horde" then
         factionRaces = HORDE_RACES
+    else
+        factionRaces = RACES  -- faction unknown: allow all
     end
     if not class then return factionRaces end
     local classRaces = CLASS_RACES[string.lower(class)] or factionRaces
@@ -91,8 +105,7 @@ end
 -- Returns classes valid for the given account's faction
 -- Horde cannot be Paladin; Alliance cannot be Shaman
 local function GetClassesForAccount(accountName)
-    local f = GuusRaidBuilder_Config.accountFactions
-    local faction = f and f[accountName]
+    local faction = GetAccountFaction(accountName)
     if faction == "Alliance" then
         local result = {}
         for i = 1, table.getn(CLASSES) do
@@ -290,8 +303,8 @@ local function BuildCommand(slot)
 end
 
 local function NewDefaultSlot(accountName)
-    local faction = GuusRaidBuilder_Config.accountFactions and GuusRaidBuilder_Config.accountFactions[accountName]
-    local defaultRace = (faction == "Alliance") and "human" or "orc"
+    local faction = GetAccountFaction(accountName)
+    local defaultRace = (faction == "Alliance") and "human" or (faction == "Horde") and "orc" or "human"
     EnsureConfig()
     local uid = GuusRaidBuilder_Config.nextUID
     GuusRaidBuilder_Config.nextUID = uid + 1
@@ -847,6 +860,28 @@ local function ShowImportFrame()
                 end
             end
 
+            -- Infer faction for each account from the imported slot races
+            local hordeRaceSet   = {}
+            local allianceRaceSet = {}
+            for _, r in pairs(HORDE_RACES)   do hordeRaceSet[r]    = true end
+            for _, r in pairs(ALLIANCE_RACES) do allianceRaceSet[r] = true end
+            local inferredFaction = {}
+            for si = 1, table.getn(slots) do
+                local acc  = slots[si].account
+                local race = string.lower(slots[si].race or "")
+                local lkey = string.lower(acc)
+                -- Alliance evidence wins (first definitive race found per account wins)
+                if allianceRaceSet[race] then
+                    inferredFaction[lkey] = { name = acc, faction = "Alliance" }
+                elseif hordeRaceSet[race] and not inferredFaction[lkey] then
+                    inferredFaction[lkey] = { name = acc, faction = "Horde" }
+                end
+            end
+            -- Always apply inferred faction from import (import text is ground truth)
+            for _, info in pairs(inferredFaction) do
+                GuusRaidBuilder_Config.accountFactions[info.name] = info.faction
+            end
+
             -- Create or overwrite the preset
             if not GuusRaidBuilder_Config.presets[presetName] then
                 GuusRaidBuilder_Config.presets[presetName] = {}
@@ -1120,8 +1155,10 @@ RefreshLeftPanel = function()
             local f = GuusRaidBuilder_Config.accountFactions[capturedAccF]
             if f == "Horde" then
                 GuusRaidBuilder_Config.accountFactions[capturedAccF] = "Alliance"
-            else
+            elseif f == "Alliance" then
                 GuusRaidBuilder_Config.accountFactions[capturedAccF] = "Horde"
+            else
+                GuusRaidBuilder_Config.accountFactions[capturedAccF] = "Alliance"
             end
             ApplyFactionStyle(capturedFBtn, GuusRaidBuilder_Config.accountFactions[capturedAccF])
             RefreshRightPanel()
@@ -1278,8 +1315,16 @@ RefreshLeftPanel = function()
             local doAdd = function()
                 local name = trim(GRB_AccEdit:GetText())
                 if name ~= "" then
-                    table.insert(GuusRaidBuilder_Config.accounts, name)
-                    RefreshLeftPanel()
+                    local lname = string.lower(name)
+                    local found = false
+                    local accs = GuusRaidBuilder_Config.accounts
+                    for ai = 1, table.getn(accs) do
+                        if string.lower(accs[ai]) == lname then found = true; break end
+                    end
+                    if not found then
+                        table.insert(accs, name)
+                        RefreshLeftPanel()
+                    end
                 end
                 GRB_AccPopupFrame:Hide()
             end
@@ -1623,9 +1668,13 @@ RefreshRightPanel = function()
         specBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[5], -2)
 
         local raceOpts = GetRacesForAccount(acc, slot.class)
-        if not IsRaceValidForAccount(slot.race, acc, slot.class) then slot.race = raceOpts[1] end
+        local displayRace = slot.race
+        if not IsRaceValidForAccount(displayRace, acc, slot.class) then
+            displayRace = raceOpts[1]
+            slot.race = displayRace  -- fix saved data too, but only after faction is known
+        end
         local raceBtn = MakeCycleBtn(row, "GRBRace" .. i, COL_W[6], ROW_HEIGHT - 4,
-            raceOpts, slot.race, function(v) slots[capturedI].race = v end)
+            raceOpts, displayRace, function(v) slots[capturedI].race = v end)
         raceBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[6], -2)
 
         local genderBtn = MakeCycleBtn(row, "GRBGender" .. i, COL_W[7], ROW_HEIGHT - 4,
