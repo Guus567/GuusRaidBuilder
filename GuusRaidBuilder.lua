@@ -24,7 +24,7 @@ local SPECS = {
     paladin = { "might", "magic" },
 }
 
--- Valid roles per class (mirrors GuusLegacyManager)
+-- Valid roles per class
 local CLASS_ROLES = {
     warrior = { "tank", "mdps" },
     mage    = { "rdps" },
@@ -332,13 +332,23 @@ local function NewDefaultSlot(accountName)
     EnsureConfig()
     local uid = GuusRaidBuilder_Config.nextUID
     GuusRaidBuilder_Config.nextUID = uid + 1
+    -- Use the stored account class (manual override first, then auto-detected) if valid
+    local storedClass = GetAccountClass(accountName) or GetAccountClassAuto(accountName)
+    local defaultClass = "warrior"
+    local defaultRole  = "tank"
+    local defaultSpec  = "default"
+    if storedClass and IsClassValidForAccount(storedClass, accountName) then
+        defaultClass = string.lower(storedClass)
+        defaultRole  = GetClassRoles(defaultClass)[1]
+        defaultSpec  = GetSpecs(defaultClass)[1]
+    end
     return {
         uid     = uid,
         account = accountName,
         tier    = "t2r",
-        class   = "warrior",
-        role    = "tank",
-        spec    = "default",
+        class   = defaultClass,
+        role    = defaultRole,
+        spec    = defaultSpec,
         race    = defaultRace,
         gender  = "male",
     }
@@ -373,17 +383,6 @@ local function GetPresetTotalCount(presetName)
         if v and v.charName and v.charName ~= "" then legacyCount = legacyCount + 1 end
     end
     return 1 + botCount + legacyCount  -- 1 = yourself
-end
-
--- Get class of a legacy character by name (searches GuusLegacyManager)
-local function GetLegacyCharClass(charName)
-    if not GuusLegacyManager then return nil end
-    for fullName, data in pairs(GuusLegacyManager) do
-        if type(data) == "table" and data.name == charName then
-            return data.class
-        end
-    end
-    return nil
 end
 
 -- ============================================================
@@ -1555,7 +1554,7 @@ RefreshRightPanel = function()
         nameLbl:SetTextColor(0.80, 0.50, 1.0)
 
         local capturedAcc = acc
-        local charClass = string.lower(GetLegacyCharClass(ls.charName) or "warrior")
+        local charClass = string.lower(GetAccountClass(acc) or "warrior")
         local roleOpts  = GetClassRoles(charClass)
         local roleValid = false
         for ri = 1, table.getn(roleOpts) do if roleOpts[ri] == ls.role then roleValid = true; break end end
@@ -1565,7 +1564,7 @@ RefreshRightPanel = function()
             roleOpts, ls.role,
             function(v)
                 legacySlots[capturedAcc].role = v
-                local sp = GetSpecs(string.lower(GetLegacyCharClass(legacySlots[capturedAcc].charName) or "warrior"))
+                local sp = GetSpecs(string.lower(GetAccountClass(capturedAcc) or "warrior"))
                 legacySlots[capturedAcc].spec = sp[1]
                 RefreshRightPanel()
             end)
@@ -1869,8 +1868,7 @@ RefreshRightPanel = function()
             else
                 local ls = legacySlots[item.acc]
                 if sk == "class" then
-                    local cls = (GuusRaidBuilder_Config.accountClasses and GuusRaidBuilder_Config.accountClasses[item.acc])
-                               or GetLegacyCharClass(ls.charName) or ""
+                    local cls = GetAccountClass(item.acc) or ""
                     return string.lower(cls)
                 elseif sk == "role"    then return string.lower(ls.role or "")
                 elseif sk == "spec"    then return string.lower(ls.spec or "")
@@ -2758,15 +2756,23 @@ local function GRB_TryAddCurrentAccount()
         GuusRaidBuilder_Config.accountFactions[name] = faction
     end
     local class = UnitClass("player")
+    local classUpdated = false
     if class and class ~= "" then
         GuusRaidBuilder_Config.accountClasses[name] = class
         GuusRaidBuilder_Config.accountClassAuto[name] = true
+        classUpdated = true
     end
     local accounts = GuusRaidBuilder_Config.accounts
     -- Check if already in list (case-insensitive)
     local lname = string.lower(name)
     for i = 1, table.getn(accounts) do
-        if string.lower(accounts[i]) == lname then return true end
+        if string.lower(accounts[i]) == lname then
+            -- Normalise stored name to the real capitalised UnitName so keys always match
+            if accounts[i] ~= name then accounts[i] = name end
+            -- Refresh left panel so name colour updates immediately if window is open
+            if classUpdated and leftScrollContent then RefreshLeftPanel() end
+            return true
+        end
     end
     -- Not found — add it
     table.insert(accounts, name)
