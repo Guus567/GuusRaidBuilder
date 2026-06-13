@@ -229,6 +229,12 @@ local function cycleNext(tbl, current)
     return tbl[idx]
 end
 
+local function cyclePrev(tbl, current)
+    local idx = findIndex(tbl, current) - 1
+    if idx < 1 then idx = table.getn(tbl) end
+    return tbl[idx]
+end
+
 local function trim(s)
     s = string.gsub(s or "", "^%s+", "")
     s = string.gsub(s, "%s+$", "")
@@ -560,6 +566,8 @@ local rightScrollFrame  = nil
 local rightScrollContent = nil
 local summaryText       = nil
 local presetCycleBtn    = nil
+local presetDropBtn     = nil
+local GRB_PresetPickerFrame = nil
 local exportFrame       = nil
 local exportEditBox     = nil
 
@@ -581,8 +589,14 @@ local OpenLegacyPicker
 -- CYCLE BUTTON FACTORY
 -- ============================================================
 
-local function MakeCycleBtn(parent, name, w, h, options, currentVal, onChange)
+local GRB_CYCLE_TTIP = "Left-click: next  ·  Right-click: previous"
+
+local function MakeCycleBtn(parent, name, w, h, options, currentVal, onChange, tooltipTitle)
     local btn = CreateFrame("Button", name, parent)
+    
+    -- Tell the button to listen for both Left and Right clicks
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    
     btn:SetWidth(w)
     btn:SetHeight(h)
     btn:SetBackdrop({
@@ -600,10 +614,26 @@ local function MakeCycleBtn(parent, name, w, h, options, currentVal, onChange)
     lbl:SetTextColor(1, 1, 1)
     btn.lbl = lbl
 
-    btn:SetScript("OnEnter", function() btn:SetBackdropColor(0.22, 0.22, 0.32, 0.95) end)
-    btn:SetScript("OnLeave", function() btn:SetBackdropColor(0.12, 0.12, 0.18, 0.92) end)
+    btn:SetScript("OnEnter", function()
+        btn:SetBackdropColor(0.22, 0.22, 0.32, 0.95)
+        if tooltipTitle then
+            GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
+            GameTooltip:SetText(tooltipTitle, 1, 1, 1)
+            GameTooltip:AddLine(GRB_CYCLE_TTIP, 0.8, 0.8, 0.8, 1)
+            GameTooltip:Show()
+        end
+    end)
+    btn:SetScript("OnLeave", function()
+        btn:SetBackdropColor(0.12, 0.12, 0.18, 0.92)
+        if tooltipTitle then GameTooltip:Hide() end
+    end)
+    
+    -- In Vanilla, 'arg1' securely holds which mouse button was clicked
     btn:SetScript("OnClick", function()
-        local newVal = cycleNext(options, btn.lbl:GetText())
+        local buttonPressed = arg1
+        local newVal = (buttonPressed == "RightButton")
+            and cyclePrev(options, btn.lbl:GetText())
+            or  cycleNext(options, btn.lbl:GetText())
         btn.lbl:SetText(newVal)
         if onChange then onChange(newVal) end
     end)
@@ -1567,7 +1597,7 @@ RefreshRightPanel = function()
                 local sp = GetSpecs(string.lower(GetAccountClass(capturedAcc) or "warrior"))
                 legacySlots[capturedAcc].spec = sp[1]
                 RefreshRightPanel()
-            end)
+            end, "Role")
         roleBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[4], -2)
 
         local specOpts = GetSpecs(charClass)
@@ -1576,7 +1606,7 @@ RefreshRightPanel = function()
         if not specValid2 then ls.spec = specOpts[1] end
         local specBtn = MakeCycleBtn(lrow, "GRBLegacySpec"..ai, COL_W[5], ROW_HEIGHT - 4,
             specOpts, ls.spec,
-            function(v) legacySlots[capturedAcc].spec = v end)
+            function(v) legacySlots[capturedAcc].spec = v end, "Spec")
         specBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[5], -2)
 
         local fillerLbl = lrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1656,7 +1686,7 @@ RefreshRightPanel = function()
         local capturedI = i
 
         local tierBtn = MakeCycleBtn(row, "GRBTier" .. i, COL_W[2], ROW_HEIGHT - 4,
-            TIERS, slot.tier or "t2r", function(v) slots[capturedI].tier = v end)
+            TIERS, slot.tier or "t2r", function(v) slots[capturedI].tier = v end, "Tier")
         tierBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[2], -2)
 
         local classOpts = GetClassesForAccount(acc)
@@ -1672,14 +1702,14 @@ RefreshRightPanel = function()
                 if not IsRoleValidForClass(slots[capturedI].role, v) then slots[capturedI].role = GetClassRoles(v)[1] end
                 slots[capturedI].spec = GetSpecs(v)[1]
                 RefreshRightPanel()
-            end)
+            end, "Class")
         classBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[3], -2)
 
         local roleOpts = GetClassRoles(slot.class or "warrior")
         if not IsRoleValidForClass(slot.role, slot.class) then slot.role = roleOpts[1] end
         local roleBtn = MakeCycleBtn(row, "GRBRole" .. i, COL_W[4], ROW_HEIGHT - 4,
             roleOpts, slot.role,
-            function(v) slots[capturedI].role = v ; RefreshSummary() ; RefreshRightPanel() end)
+            function(v) slots[capturedI].role = v ; RefreshSummary() ; RefreshRightPanel() end, "Role")
         roleBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[4], -2)
 
         local specOpts = GetSpecs(slot.class or "warrior")
@@ -1687,7 +1717,7 @@ RefreshRightPanel = function()
         for si = 1, table.getn(specOpts) do if specOpts[si] == slot.spec then specValid = true; break end end
         if not specValid then slot.spec = specOpts[1] end
         local specBtn = MakeCycleBtn(row, "GRBSpec" .. i, COL_W[5], ROW_HEIGHT - 4,
-            specOpts, slot.spec, function(v) slots[capturedI].spec = v end)
+            specOpts, slot.spec, function(v) slots[capturedI].spec = v end, "Spec")
         specBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[5], -2)
 
         local raceOpts = GetRacesForAccount(acc, slot.class)
@@ -1697,11 +1727,11 @@ RefreshRightPanel = function()
             slot.race = displayRace  -- fix saved data too, but only after faction is known
         end
         local raceBtn = MakeCycleBtn(row, "GRBRace" .. i, COL_W[6], ROW_HEIGHT - 4,
-            raceOpts, displayRace, function(v) slots[capturedI].race = v end)
+            raceOpts, displayRace, function(v) slots[capturedI].race = v end, "Race")
         raceBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[6], -2)
 
         local genderBtn = MakeCycleBtn(row, "GRBGender" .. i, COL_W[7], ROW_HEIGHT - 4,
-            GENDERS, slot.gender or "male", function(v) slots[capturedI].gender = v end)
+            GENDERS, slot.gender or "male", function(v) slots[capturedI].gender = v end, "Gender")
         genderBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[7], -2)
 
         local remBtn = CreateFrame("Button", "GRBRem" .. i, row)
@@ -2024,7 +2054,154 @@ end
 -- PRESET MANAGEMENT
 -- ============================================================
 
-local function SwitchPreset(name)
+local SwitchPreset
+local GRB_PresetPickerRows = {}
+
+local function HidePresetPicker()
+    if GRB_PresetPickerFrame then GRB_PresetPickerFrame:Hide() end
+end
+
+local function BuildPresetPickerList()
+    if not GRB_PresetPickerFrame or not GRB_PresetPickerFrame.content then return end
+
+    for i = 1, table.getn(GRB_PresetPickerRows) do
+        GRB_PresetPickerRows[i]:Hide()
+        GRB_PresetPickerRows[i]:SetParent(nil)
+    end
+    GRB_PresetPickerRows = {}
+
+    local names = GetPresetNames()
+    local count = table.getn(names)
+    if count == 0 then return end
+
+    local content = GRB_PresetPickerFrame.content
+    local cur     = GuusRaidBuilder_Config.currentPreset
+    local rowH    = 20
+    local width   = 140
+    local maxRows = 12
+    local visible = count
+    if visible > maxRows then visible = maxRows end
+    local listH   = visible * rowH
+
+    content:SetWidth(width)
+    content:SetHeight(count * rowH)
+
+    for i = 1, count do
+        local presetName = names[i]
+        local row = CreateFrame("Button", nil, content)
+        row:SetWidth(width)
+        row:SetHeight(rowH)
+        if i == 1 then
+            row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+        else
+            row:SetPoint("TOPLEFT", GRB_PresetPickerRows[i - 1], "BOTTOMLEFT", 0, 0)
+        end
+        row:SetBackdrop({
+            bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 8,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 }
+        })
+        if presetName == cur then
+            row:SetBackdropColor(0.18, 0.22, 0.12, 0.95)
+            row:SetBackdropBorderColor(0.45, 0.65, 0.30, 0.85)
+        else
+            row:SetBackdropColor(0.10, 0.10, 0.16, 0.92)
+            row:SetBackdropBorderColor(0.35, 0.35, 0.45, 0.65)
+        end
+        local rowLbl = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        rowLbl:SetPoint("LEFT", row, "LEFT", 6, 0)
+        rowLbl:SetWidth(width - 12)
+        rowLbl:SetJustifyH("LEFT")
+        rowLbl:SetText(presetName)
+        if presetName == cur then
+            rowLbl:SetTextColor(1.0, 0.95, 0.55)
+        else
+            rowLbl:SetTextColor(0.92, 0.92, 0.92)
+        end
+        row:SetScript("OnEnter", function()
+            row:SetBackdropColor(0.20, 0.22, 0.32, 0.95)
+            row:SetBackdropBorderColor(0.50, 0.50, 0.65, 0.85)
+        end)
+        row:SetScript("OnLeave", function()
+            if presetName == cur then
+                row:SetBackdropColor(0.18, 0.22, 0.12, 0.95)
+                row:SetBackdropBorderColor(0.45, 0.65, 0.30, 0.85)
+            else
+                row:SetBackdropColor(0.10, 0.10, 0.16, 0.92)
+                row:SetBackdropBorderColor(0.35, 0.35, 0.45, 0.65)
+            end
+        end)
+        row:SetScript("OnClick", function() SwitchPreset(presetName) end)
+        table.insert(GRB_PresetPickerRows, row)
+    end
+
+    if count <= maxRows then
+        GRB_PresetPickerFrame.scroll:Hide()
+        GRB_PresetPickerFrame:SetHeight(listH + 6)
+        content:SetParent(GRB_PresetPickerFrame)
+        content:ClearAllPoints()
+        content:SetPoint("TOPLEFT", GRB_PresetPickerFrame, "TOPLEFT", 3, -3)
+    else
+        GRB_PresetPickerFrame.scroll:Show()
+        content:SetParent(GRB_PresetPickerFrame.scroll)
+        GRB_PresetPickerFrame:SetHeight(maxRows * rowH + 6)
+        content:ClearAllPoints()
+        GRB_PresetPickerFrame.scroll:SetScrollChild(content)
+        GRB_PresetPickerFrame.scroll:SetVerticalScroll(0)
+    end
+    GRB_PresetPickerFrame:SetWidth(width + 6)
+end
+
+local function TogglePresetPicker(anchor)
+    local names = GetPresetNames()
+    if table.getn(names) == 0 then return end
+
+    if not GRB_PresetPickerFrame then
+        GRB_PresetPickerFrame = CreateFrame("Frame", "GRBPresetPickerFrame", mainFrame)
+        GRB_PresetPickerFrame:SetFrameStrata("DIALOG")
+        GRB_PresetPickerFrame:SetBackdrop({
+            bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 10,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 }
+        })
+        GRB_PresetPickerFrame:SetBackdropColor(0.05, 0.05, 0.10, 0.95)
+        GRB_PresetPickerFrame:SetBackdropBorderColor(0.45, 0.45, 0.60, 0.9)
+        GRB_PresetPickerFrame:EnableMouse(true)
+
+        GRB_PresetPickerFrame.scroll = CreateFrame("ScrollFrame", "GRBPresetPickerScroll", GRB_PresetPickerFrame)
+        GRB_PresetPickerFrame.scroll:SetPoint("TOPLEFT", GRB_PresetPickerFrame, "TOPLEFT", 3, -3)
+        GRB_PresetPickerFrame.scroll:SetPoint("BOTTOMRIGHT", GRB_PresetPickerFrame, "BOTTOMRIGHT", -3, 3)
+        GRB_PresetPickerFrame.scroll:EnableMouseWheel(true)
+        GRB_PresetPickerFrame.scroll:SetScript("OnMouseWheel", function()
+            local cur = GRB_PresetPickerFrame.scroll:GetVerticalScroll()
+            local step = 20
+            if arg1 and arg1 > 0 then
+                cur = cur - step
+            else
+                cur = cur + step
+            end
+            if cur < 0 then cur = 0 end
+            GRB_PresetPickerFrame.scroll:SetVerticalScroll(cur)
+        end)
+
+        GRB_PresetPickerFrame.content = CreateFrame("Frame", nil, GRB_PresetPickerFrame.scroll)
+    end
+
+    if GRB_PresetPickerFrame:IsVisible() then
+        GRB_PresetPickerFrame:Hide()
+        return
+    end
+
+    BuildPresetPickerList()
+    GRB_PresetPickerFrame:ClearAllPoints()
+    GRB_PresetPickerFrame:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+    GRB_PresetPickerFrame:Show()
+end
+
+SwitchPreset = function(name)
+    HidePresetPicker()
     GuusRaidBuilder_Config.currentPreset = name
     RefreshAll()
 end
@@ -2063,6 +2240,7 @@ local function CreateMainGUI()
         insets = { left = 11, right = 12, top = 12, bottom = 11 }
     })
     mainFrame:SetFrameStrata("MEDIUM")
+    mainFrame:SetScript("OnHide", function() HidePresetPicker() end)
 
     -- Title
     local title = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
@@ -2076,7 +2254,7 @@ local function CreateMainGUI()
     closeBtn:SetNormalTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Up")
     closeBtn:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight")
     closeBtn:SetPushedTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Down")
-    closeBtn:SetScript("OnClick", function() mainFrame:Hide() end)
+    closeBtn:SetScript("OnClick", function() HidePresetPicker(); mainFrame:Hide() end)
 
     -- ===== TOP BAR Y = -32 =====
     local TOP_Y = -32
@@ -2086,8 +2264,12 @@ local function CreateMainGUI()
     pLbl:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 15, TOP_Y)
     pLbl:SetText("Preset:")
 
-    -- Preset cycle button
+-- Preset cycle button
     presetCycleBtn = CreateFrame("Button", "GRBPresetCycleBtn", mainFrame)
+    
+    -- Tell the Preset button to listen for Right Clicks!
+    presetCycleBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    
     presetCycleBtn:SetWidth(100)
     presetCycleBtn:SetHeight(22)
     presetCycleBtn:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 63, TOP_Y)
@@ -2103,19 +2285,66 @@ local function CreateMainGUI()
     presetCycleBtn.lbl:SetPoint("CENTER", presetCycleBtn, "CENTER", 0, 0)
     presetCycleBtn.lbl:SetText("(none)")
     presetCycleBtn.lbl:SetTextColor(1, 1, 0.65)
-    presetCycleBtn:SetScript("OnEnter", function() presetCycleBtn:SetBackdropColor(0.22, 0.22, 0.36, 0.95) end)
-    presetCycleBtn:SetScript("OnLeave", function() presetCycleBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9) end)
+    presetCycleBtn:SetScript("OnEnter", function()
+        presetCycleBtn:SetBackdropColor(0.22, 0.22, 0.36, 0.95)
+        GameTooltip:SetOwner(presetCycleBtn, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Preset", 1, 1, 1)
+        GameTooltip:AddLine("Left-click: next  ·  Right-click: previous", 0.8, 0.8, 0.8, 1)
+        GameTooltip:AddLine("Click ▼ to pick from list", 1, 1, 0.6, 1)
+        GameTooltip:Show()
+    end)
+    presetCycleBtn:SetScript("OnLeave", function()
+        presetCycleBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9)
+        GameTooltip:Hide()
+    end)
+    
+    -- Change the function signature to capture arg1
     presetCycleBtn:SetScript("OnClick", function()
+        local buttonPressed = arg1
         local names = GetPresetNames()
         if table.getn(names) == 0 then return end
         local cur = GuusRaidBuilder_Config.currentPreset
-        SwitchPreset(cycleNext(names, cur or names[1]))
+        local nextName = (buttonPressed == "RightButton")
+            and cyclePrev(names, cur or names[1])
+            or  cycleNext(names, cur or names[1])
+        SwitchPreset(nextName)
+    end)
+
+    presetDropBtn = CreateFrame("Button", "GRBPresetDropBtn", mainFrame)
+    presetDropBtn:SetWidth(18)
+    presetDropBtn:SetHeight(22)
+    presetDropBtn:SetPoint("TOPLEFT", presetCycleBtn, "TOPRIGHT", 1, 0)
+    presetDropBtn:SetBackdrop({
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 }
+    })
+    presetDropBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9)
+    presetDropBtn:SetBackdropBorderColor(0.48, 0.48, 0.70, 0.8)
+    local dropLbl = presetDropBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    dropLbl:SetPoint("CENTER", presetDropBtn, "CENTER", 0, 1)
+    dropLbl:SetText("v")
+    dropLbl:SetTextColor(0.85, 0.85, 1.0)
+    presetDropBtn:SetScript("OnEnter", function()
+        presetDropBtn:SetBackdropColor(0.22, 0.22, 0.36, 0.95)
+        GameTooltip:SetOwner(presetDropBtn, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Preset list", 1, 1, 1)
+        GameTooltip:AddLine("Click to pick a preset", 0.8, 0.8, 0.8, 1)
+        GameTooltip:Show()
+    end)
+    presetDropBtn:SetScript("OnLeave", function()
+        presetDropBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9)
+        GameTooltip:Hide()
+    end)
+    presetDropBtn:SetScript("OnClick", function()
+        TogglePresetPicker(presetCycleBtn)
     end)
 
     -- [New]
     local newBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
     newBtn:SetWidth(42); newBtn:SetHeight(20)
-    newBtn:SetPoint("TOPLEFT", presetCycleBtn, "TOPRIGHT", 4, 0)
+    newBtn:SetPoint("TOPLEFT", presetDropBtn, "TOPRIGHT", 4, 0)
     newBtn:SetText("New")
     newBtn:SetScript("OnClick", function()
         if not GRB_NewPopupFrame then
@@ -2371,6 +2600,15 @@ local function CreateMainGUI()
     rightScrollContent:SetHeight(2000)
     rightScrollFrame:SetScrollChild(rightScrollContent)
 
+    -- Transfer button (bottom-left)
+    local transferBtn = CreateFrame("Button", "GRBTransferBtn", mainFrame, "UIPanelButtonTemplate")
+    transferBtn:SetWidth(90); transferBtn:SetHeight(22)
+    transferBtn:SetPoint("BOTTOMLEFT", mainFrame, "BOTTOMLEFT", 14, 12)
+    transferBtn:SetText("Transfer")
+    transferBtn:SetScript("OnClick", function()
+        SendChatMessage(".z transfer", "SAY")
+    end)
+
     RefreshAll()
     mainFrame:Show()
 end
@@ -2560,7 +2798,7 @@ OpenLegacyPicker = function(accountName, presetName)
         for i = 1, table.getn(roleOpts) do if roleOpts[i] == initRole then roleOk = true end end
         if not roleOk then initRole = roleOpts[1] end
 
-        GRB_LegacyPopupFrame.roleBtn = MakeCycleBtn(GRB_LegacyPopupFrame, nil, 62, 22, roleOpts, initRole, nil)
+        GRB_LegacyPopupFrame.roleBtn = MakeCycleBtn(GRB_LegacyPopupFrame, nil, 62, 22, roleOpts, initRole, nil, "Role")
         GRB_LegacyPopupFrame.roleBtn:SetPoint("TOPLEFT", GRB_LegacyPopupFrame, "TOPLEFT", 52, roleY)
         local function UpdateRoleColor()
             local r = GRB_LegacyPopupFrame.roleBtn.lbl:GetText() or roleOpts[1]
@@ -2568,9 +2806,12 @@ OpenLegacyPicker = function(accountName, presetName)
             GRB_LegacyPopupFrame.roleBtn.lbl:SetTextColor(c[1], c[2], c[3])
         end
         UpdateRoleColor()
-        GRB_LegacyPopupFrame.roleBtn:SetScript("OnClick", function()
+        GRB_LegacyPopupFrame.roleBtn:SetScript("OnClick", function(_, button)
             local cur = GRB_LegacyPopupFrame.roleBtn.lbl:GetText()
-            GRB_LegacyPopupFrame.roleBtn.lbl:SetText(cycleNext(roleOpts, cur))
+            local newVal = (button == "RightButton")
+                and cyclePrev(roleOpts, cur)
+                or  cycleNext(roleOpts, cur)
+            GRB_LegacyPopupFrame.roleBtn.lbl:SetText(newVal)
             UpdateRoleColor()
         end)
 
@@ -2582,7 +2823,7 @@ OpenLegacyPicker = function(accountName, presetName)
             local specOk   = false
             for i = 1, table.getn(specOpts) do if specOpts[i] == initSpec then specOk = true end end
             if not specOk then initSpec = specOpts[1] end
-            GRB_LegacyPopupFrame.specBtn = MakeCycleBtn(GRB_LegacyPopupFrame, nil, 80, 22, specOpts, initSpec, nil)
+            GRB_LegacyPopupFrame.specBtn = MakeCycleBtn(GRB_LegacyPopupFrame, nil, 80, 22, specOpts, initSpec, nil, "Spec")
             GRB_LegacyPopupFrame.specBtn:SetPoint("TOPLEFT", GRB_LegacyPopupFrame, "TOPLEFT", 52, specY)
             GRB_LegacyPopupFrame:SetHeight(isAutoClass and 155 or 185)
         else
@@ -2609,7 +2850,7 @@ OpenLegacyPicker = function(accountName, presetName)
         end
         if not classOk then initClass = classOptsDisp[1] end
 
-        GRB_LegacyPopupFrame.classBtn = MakeCycleBtn(GRB_LegacyPopupFrame, nil, 80, 22, classOptsDisp, initClass, nil)
+        GRB_LegacyPopupFrame.classBtn = MakeCycleBtn(GRB_LegacyPopupFrame, nil, 80, 22, classOptsDisp, initClass, nil, "Class")
         GRB_LegacyPopupFrame.classBtn:SetPoint("TOPLEFT", GRB_LegacyPopupFrame, "TOPLEFT", 52, -32)
 
         local function UpdateClassDisplay()
@@ -2620,9 +2861,12 @@ OpenLegacyPicker = function(accountName, presetName)
                 cc2[1]*255, cc2[2]*255, cc2[3]*255) .. accountName .. "|r  legacy")
             RebuildRoleSpec(cls)
         end
-        GRB_LegacyPopupFrame.classBtn:SetScript("OnClick", function()
+        GRB_LegacyPopupFrame.classBtn:SetScript("OnClick", function(_, button)
             local cur = GRB_LegacyPopupFrame.classBtn.lbl:GetText()
-            GRB_LegacyPopupFrame.classBtn.lbl:SetText(cycleNext(classOptsDisp, cur))
+            local newVal = (button == "RightButton")
+                and cyclePrev(classOptsDisp, cur)
+                or  cycleNext(classOptsDisp, cur)
+            GRB_LegacyPopupFrame.classBtn.lbl:SetText(newVal)
             UpdateClassDisplay()
         end)
         UpdateClassDisplay()  -- set initial colors and build role/spec for initClass
