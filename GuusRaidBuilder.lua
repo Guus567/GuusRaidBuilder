@@ -9,7 +9,7 @@ GuusRaidBuilder_Config = GuusRaidBuilder_Config or {}
 -- DATA TABLES
 -- ============================================================
 
-local TIERS = { "t1r", "t2r", "t3r", "t4r", "t5r", "t1d", "t2d", "t3d", "t4d", "t5d" }
+local TIERS = { "t0", "t1r", "t2r", "t3r", "t4r", "t5r", "t1d", "t2d", "t3d", "t4d", "t5d" }
 
 local CLASSES = {
     "warrior", "mage", "warlock", "priest", "druid",
@@ -781,53 +781,83 @@ end
 -- IMPORT FRAME
 -- ============================================================
 
--- Parses the export text block and returns presetName, slots[], errors[]
+-- Parses the export text block and returns presetName, slots[], legacySlots{}, errors[]
 -- Expected format (one or more presets, we import the first one found):
 --   ["presetName"] = {
 --       ".z addinvite account tier class role spec race gender",
+--       -- legacychar CharacterName  (account)
+--       ".z addlegacy \"CharacterName\" role [spec]",
 --   },
 local function ParseImportText(text)
     if not text or trim(text) == "" then
-        return nil, nil, { "Nothing to import." }
+        return nil, nil, nil, { "Nothing to import." }
     end
 
     -- Find preset name: matches ["presetName"] = {
     local presetName = string.match(text, '%["(.-)"%]%s*=%s*{')
     if not presetName or trim(presetName) == "" then
-        return nil, nil, { 'Could not find preset name. Expected: ["name"] = {' }
+        return nil, nil, nil, { 'Could not find preset name. Expected: ["name"] = {' }
     end
     presetName = trim(presetName)
 
-    local slots  = {}
-    local errors = {}
+    local slots         = {}
+    local legacySlots   = {}
+    local errors        = {}
+    local pendingLegacy = nil
 
-    -- Match every quoted .z addinvite line
-    for line in string.gfind(text, '"(.-)"') do
-        line = trim(line)
-        -- Match: .z addinvite account tier class role spec race gender
-        local acc, tier, class, role, spec, race, gender =
-            string.match(line, "^%.z%s+addinvite%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)$")
-        if acc then
-            table.insert(slots, {
-                account = acc,
-                tier    = tier,
-                class   = string.lower(class),
-                role    = string.lower(role),
-                spec    = string.lower(spec),
-                race    = string.lower(race),
-                gender  = string.lower(gender),
-            })
+    for rawLine in string.gfind(text, "([^\r\n]+)") do
+        local line = trim(rawLine)
+
+        local legacyChar, legacyAcc = string.match(line, "^%-%-%s*legacychar%s+(.+)%s+%(([^%)]+)%)$")
+        if legacyChar and legacyAcc then
+            pendingLegacy = {
+                charName = trim(legacyChar),
+                account  = trim(legacyAcc),
+            }
         else
-            -- Not a .z addinvite line — skip silently (could be a comment or empty)
+            if string.sub(line, 1, 1) == '"' then
+                line = string.gsub(line, '^"', "")
+                line = string.gsub(line, '",?$', "")
+            elseif string.sub(line, 1, 1) == "'" then
+                line = string.gsub(line, "^'", "")
+                line = string.gsub(line, "',?$", "")
+            end
+            line = trim(line)
+
+            local acc, tier, class, role, spec, race, gender =
+                string.match(line, "^%.z%s+addinvite%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)$")
+            if acc then
+                table.insert(slots, {
+                    account = acc,
+                    tier    = tier,
+                    class   = string.lower(class),
+                    role    = string.lower(role),
+                    spec    = string.lower(spec),
+                    race    = string.lower(race),
+                    gender  = string.lower(gender),
+                })
+                pendingLegacy = nil
+            else
+                local charName, legacyRole, legacySpec =
+                    string.match(line, '^%.z%s+addlegacy%s+"(.-)"%s+(%S+)%s*(%S*)$')
+                if charName and pendingLegacy and pendingLegacy.account and pendingLegacy.account ~= "" then
+                    legacySlots[pendingLegacy.account] = {
+                        charName = charName,
+                        role     = string.lower(legacyRole),
+                        spec     = string.lower(legacySpec or ""),
+                    }
+                    pendingLegacy = nil
+                end
+            end
         end
     end
 
-    if table.getn(slots) == 0 then
-        table.insert(errors, "No valid '.z addinvite ...' lines found.")
-        return presetName, nil, errors
+    if table.getn(slots) == 0 and countTableElements(legacySlots) == 0 then
+        table.insert(errors, "No valid '.z addinvite ...' or '.z addlegacy ...' lines found.")
+        return presetName, nil, nil, errors
     end
 
-    return presetName, slots, errors
+    return presetName, slots, legacySlots, errors
 end
 
 local importFrame    = nil
@@ -859,7 +889,7 @@ local function ShowImportFrame()
 
         local hint = importFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         hint:SetPoint("TOP", importFrame, "TOP", 0, -30)
-        hint:SetText('Format: ["name"] = { ".z addinvite acc tier class role spec race gender", }  (-- comments optional)')
+        hint:SetText('Paste a full Export block here: ["name"] = { ".z addinvite ...", ".z addlegacy ..." }')
         hint:SetTextColor(0.8, 0.8, 0.5)
 
         -- Status line
@@ -887,7 +917,7 @@ local function ShowImportFrame()
         -- [Import] action button
         local doImport = function()
             local text = importEditBox:GetText()
-            local presetName, slots, errors = ParseImportText(text)
+            local presetName, slots, legacySlots, errors = ParseImportText(text)
 
             if table.getn(errors) > 0 then
                 local msg = ""
@@ -940,11 +970,13 @@ local function ShowImportFrame()
                 GuusRaidBuilder_Config.presets[presetName] = {}
             end
             GuusRaidBuilder_Config.presets[presetName].slots = slots
+            GuusRaidBuilder_Config.presets[presetName].legacySlots = legacySlots or {}
             GuusRaidBuilder_Config.currentPreset = presetName
 
             importFrame.statusTxt:SetText(
                 "|cff66ff66Imported '" .. presetName .. "' with "
-                .. table.getn(slots) .. " slot(s).|r"
+                .. table.getn(slots) .. " bot slot(s) and "
+                .. countTableElements(legacySlots or {}) .. " legacy slot(s).|r"
             )
             RefreshAll()
         end
