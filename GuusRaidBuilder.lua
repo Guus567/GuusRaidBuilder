@@ -193,7 +193,7 @@ local ROLE_BG = {
 -- LAYOUT CONSTANTS
 -- ============================================================
 
-local ROW_HEIGHT   = 26
+local ROW_HEIGHT   = 22
 local LEFT_WIDTH   = 200
 local RIGHT_WIDTH  = 590
 local WINDOW_WIDTH = LEFT_WIDTH + RIGHT_WIDTH + 42
@@ -241,6 +241,11 @@ local function trim(s)
     return s
 end
 
+local SyncSpawnOrder
+local TogglePresetPicker
+local RefreshExecuteStartButton
+local GetPresetSpawnOrder
+
 -- ============================================================
 -- CONFIG / DATA ACCESS
 -- ============================================================
@@ -272,8 +277,14 @@ local function EnsureConfig()
     if not GuusRaidBuilder_Config.accountClassAuto then
         GuusRaidBuilder_Config.accountClassAuto = {}
     end
+    if not GuusRaidBuilder_Config.playerRoles then
+        GuusRaidBuilder_Config.playerRoles = {}
+    end
     if not GuusRaidBuilder_Config.nextUID then
         GuusRaidBuilder_Config.nextUID = 1
+    end
+    if not GuusRaidBuilder_Config.executeStartIndex then
+        GuusRaidBuilder_Config.executeStartIndex = 1
     end
     if GuusRaidBuilder_Config.currentPreset == nil then
         GuusRaidBuilder_Config.currentPreset = nil
@@ -310,12 +321,75 @@ local function GetAccountSlotCount(presetName, accountName)
     return count
 end
 
+local GetPresetLegacySlots
+
+local function GetExecuteStartIndex(maxIndex)
+    EnsureConfig()
+    local idx = tonumber(GuusRaidBuilder_Config.executeStartIndex) or 1
+    idx = math.floor(idx)
+    if idx < 1 then idx = 1 end
+    GuusRaidBuilder_Config.executeStartIndex = idx
+    return idx
+end
+
+local function GetRunnableSpawnCount(presetName)
+    if not presetName then return 1 end
+    local spawnOrder = GetPresetSpawnOrder(presetName)
+    local visibleTotal = table.getn(spawnOrder) + 1
+    if visibleTotal < 1 then visibleTotal = 1 end
+    return visibleTotal
+end
+
+local function CycleExecuteStart(delta)
+    local maxIndex = GetRunnableSpawnCount(GuusRaidBuilder_Config.currentPreset)
+    local idx = GetExecuteStartIndex(maxIndex) + delta
+    if idx < 1 then idx = maxIndex end
+    if idx > maxIndex then idx = 1 end
+    GuusRaidBuilder_Config.executeStartIndex = idx
+    RefreshExecuteStartButton()
+end
+
 local function GetRoleSummary(presetName)
+    EnsureConfig()
     local slots = GetPresetSlots(presetName)
-    local s = { tank = 0, healer = 0, rdps = 0, mdps = 0, total = 0 }
+    local s = {
+        tank = 0, healer = 0, rdps = 0, mdps = 0,
+        total = 0, bots = 0, legacy = 0, selfRole = nil,
+    }
     for i = 1, table.getn(slots) do
         local role = string.lower(slots[i].role or "mdps")
         if s[role] ~= nil then s[role] = s[role] + 1 end
+        s.total = s.total + 1
+        s.bots = s.bots + 1
+    end
+
+    local legacySlots = GetPresetLegacySlots(presetName)
+    for _, ls in pairs(legacySlots) do
+        if ls and ls.charName and ls.charName ~= "" then
+            local role = string.lower(ls.role or "")
+            if s[role] ~= nil then s[role] = s[role] + 1 end
+            s.total = s.total + 1
+            s.legacy = s.legacy + 1
+        end
+    end
+
+    local playerName = UnitName("player")
+    if playerName and playerName ~= "" then
+        local playerClass = GetAccountClass(playerName) or UnitClass("player")
+        local configuredRole = GuusRaidBuilder_Config.playerRoles[playerName]
+        local playerRole = nil
+        if configuredRole and IsRoleValidForClass(configuredRole, playerClass) then
+            playerRole = string.lower(configuredRole)
+        else
+            local validRoles = GetClassRoles(playerClass)
+            if table.getn(validRoles) == 1 then
+                playerRole = validRoles[1]
+            end
+        end
+        if playerRole and s[playerRole] ~= nil then
+            s[playerRole] = s[playerRole] + 1
+        end
+        s.selfRole = playerRole
         s.total = s.total + 1
     end
     return s
@@ -364,7 +438,7 @@ end
 -- LEGACY SLOT HELPERS
 -- ============================================================
 
-local function GetPresetLegacySlots(presetName)
+GetPresetLegacySlots = function(presetName)
     EnsureConfig()
     if not presetName or not GuusRaidBuilder_Config.presets[presetName] then return {} end
     local p = GuusRaidBuilder_Config.presets[presetName]
@@ -407,7 +481,7 @@ local function AssignSlotUIDs(presetName)
     end
 end
 
-local function GetPresetSpawnOrder(presetName)
+GetPresetSpawnOrder = function(presetName)
     EnsureConfig()
     if not presetName or not GuusRaidBuilder_Config.presets[presetName] then return {} end
     local p = GuusRaidBuilder_Config.presets[presetName]
@@ -417,7 +491,7 @@ end
 
 -- Sync spawnOrder: remove stale tokens, append new ones in default order.
 -- Returns (orderedTokens, slotByToken) where slotByToken maps "b:uid" -> slot object.
-local function SyncSpawnOrder(presetName)
+SyncSpawnOrder = function(presetName)
     AssignSlotUIDs(presetName)
     local slots      = GetPresetSlots(presetName)
     local legSlots   = GetPresetLegacySlots(presetName)
@@ -484,36 +558,53 @@ local GRB_stopButton    = nil
 local function ExecuteRaid(presetName)
     local legacySlots = GetPresetLegacySlots(presetName)
     local spawnOrder, slotByToken = SyncSpawnOrder(presetName)
+    local displayTotal = table.getn(spawnOrder) + 1
+    local startDisplayIndex = GetExecuteStartIndex(displayTotal)
+    if startDisplayIndex > displayTotal then
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cffff0000GuusRaidBuilder:|r Spawn #" .. startDisplayIndex
+            .. " is higher than the number of rows in this preset."
+        )
+        return
+    end
+    local startSpawnPos = startDisplayIndex - 1
+    if startSpawnPos < 1 then startSpawnPos = 1 end
 
     -- Build command list in spawn order
-    local commands = {}
-    local cmdLabels = {}
-    for si = 1, table.getn(spawnOrder) do
+    local queuedCommands = {}
+    local queuedLabels = {}
+    local queuedDisplayIndices = {}
+    for si = startSpawnPos, table.getn(spawnOrder) do
         local token = spawnOrder[si]
         if string.sub(token, 1, 2) == "b:" then
             local s = slotByToken[token]
             if s then
-                table.insert(commands, BuildCommand(s))
-                table.insert(cmdLabels, (s.account or "?") .. " [bot]")
+                table.insert(queuedCommands, BuildCommand(s))
+                table.insert(queuedLabels, (s.account or "?") .. " [bot]")
+                table.insert(queuedDisplayIndices, si + 1)
             end
         elseif string.sub(token, 1, 2) == "l:" then
             local acc = string.sub(token, 3)
             local ls = legacySlots[acc]
             if ls and ls.charName and ls.charName ~= "" then
-                table.insert(commands, BuildLegacyCommand(ls))
-                table.insert(cmdLabels, ls.charName .. " [legacy]")
+                table.insert(queuedCommands, BuildLegacyCommand(ls))
+                table.insert(queuedLabels, ls.charName .. " [legacy]")
+                table.insert(queuedDisplayIndices, si + 1)
             end
         end
     end
 
-    local total = table.getn(commands)
-    if total == 0 then
+    local queueTotal = table.getn(queuedCommands)
+    if queueTotal == 0 then
         DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r No slots in preset '" .. presetName .. "'!")
         return
     end
     if GRB_executing then
         DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r Already running. Press Stop first.")
         return
+    end
+    if startDisplayIndex > 1 then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GuusRaidBuilder:|r Starting from spawn order " .. startDisplayIndex .. ".")
     end
 
     GRB_executing     = true
@@ -532,24 +623,29 @@ local function ExecuteRaid(presetName)
             GRB_stopRequested = false
             if GRB_stopButton then GRB_stopButton:Hide() end
             GRB_executeFrame:SetScript("OnUpdate", nil)
-            DEFAULT_CHAT_FRAME:AddMessage("|cffff6600GuusRaidBuilder:|r Stopped at " .. index .. "/" .. total)
+            local stoppedAt = startDisplayIndex - 1
+            if index > 0 and queuedDisplayIndices[index] then
+                stoppedAt = queuedDisplayIndices[index]
+            end
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff6600GuusRaidBuilder:|r Stopped at " .. stoppedAt .. "/" .. displayTotal)
             return
         end
         elapsed = elapsed + 1
         if elapsed >= delay or index == 0 then
             index = index + 1
-            if index <= total then
-                SendChatMessage(commands[index], "SAY")
+            if index <= queueTotal then
+                local actualIndex = queuedDisplayIndices[index] or startDisplayIndex
+                SendChatMessage(queuedCommands[index], "SAY")
                 elapsed = 0
                 DEFAULT_CHAT_FRAME:AddMessage(
-                    "|cff00ff00GuusRaidBuilder:|r " .. index .. "/" .. total
-                    .. " -> " .. (cmdLabels[index] or "?")
+                    "|cff00ff00GuusRaidBuilder:|r " .. actualIndex .. "/" .. displayTotal
+                    .. " -> " .. (queuedLabels[index] or "?")
                 )
             else
                 GRB_executing = false
                 if GRB_stopButton then GRB_stopButton:Hide() end
                 GRB_executeFrame:SetScript("OnUpdate", nil)
-                DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GuusRaidBuilder:|r Done! Sent " .. total .. " invites.")
+                DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GuusRaidBuilder:|r Done! Sent " .. queueTotal .. " invites.")
             end
         end
     end)
@@ -565,6 +661,10 @@ local leftScrollContent = nil
 local rightScrollFrame  = nil
 local rightScrollContent = nil
 local summaryText       = nil
+local summaryBar        = nil
+local summaryNameText   = nil
+local summaryBadges     = nil
+local executeStartBtn   = nil
 local presetCycleBtn    = nil
 local presetDropBtn     = nil
 local GRB_PresetPickerFrame = nil
@@ -581,6 +681,7 @@ local GRB_accountTopY = {}
 local RefreshAll
 local RefreshSummary
 local RefreshPresetButton
+local HidePresetPicker
 local RefreshLeftPanel
 local RefreshRightPanel
 local OpenLegacyPicker
@@ -607,13 +708,11 @@ local function MakeCycleBtn(parent, name, w, h, options, currentVal, onChange, t
     })
     btn:SetBackdropColor(0.12, 0.12, 0.18, 0.92)
     btn:SetBackdropBorderColor(0.45, 0.45, 0.55, 0.8)
-
     local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     lbl:SetPoint("CENTER", btn, "CENTER", 0, 0)
     lbl:SetText(currentVal or options[1])
     lbl:SetTextColor(1, 1, 1)
     btn.lbl = lbl
-
     btn:SetScript("OnEnter", function()
         btn:SetBackdropColor(0.22, 0.22, 0.32, 0.95)
         if tooltipTitle then
@@ -639,6 +738,176 @@ local function MakeCycleBtn(parent, name, w, h, options, currentVal, onChange, t
     end)
 
     return btn
+end
+
+local function CommitExecuteStartInput()
+    if not executeStartBtn or not executeStartBtn.input then return end
+    local raw = trim(executeStartBtn.input:GetText() or "")
+    local idx = tonumber(raw)
+    if idx then idx = math.floor(idx) end
+    if not idx or idx < 1 then idx = 1 end
+    GuusRaidBuilder_Config.executeStartIndex = idx
+    RefreshExecuteStartButton()
+end
+
+local function GRB_ExecuteStartBtn_OnEnter()
+    GameTooltip:SetOwner(executeStartBtn.input or executeStartBtn, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Start from spawn order", 1, 1, 1)
+    GameTooltip:AddLine("Uses the visible SpawnOrder column.", 0.8, 0.8, 0.8, 1)
+    GameTooltip:AddLine("1 is your own slot, so the first inviteable bot is usually 2.", 0.8, 0.8, 0.8, 1)
+    GameTooltip:Show()
+end
+
+local function GRB_ExecuteStartBtn_OnLeave()
+    GameTooltip:Hide()
+end
+
+local function GRB_ExecuteStartInput_OnEnterPressed()
+    CommitExecuteStartInput()
+    if executeStartBtn and executeStartBtn.input then executeStartBtn.input:ClearFocus() end
+end
+
+local function GRB_ExecuteStartInput_OnEscapePressed()
+    RefreshExecuteStartButton()
+    if executeStartBtn and executeStartBtn.input then executeStartBtn.input:ClearFocus() end
+end
+
+local function GRB_ExecuteStartInput_OnEditFocusLost()
+    CommitExecuteStartInput()
+end
+
+local function GRB_ExecuteStartInput_OnTextChanged()
+    local raw = executeStartBtn.input:GetText() or ""
+    local digitsOnly = string.gsub(raw, "[^0-9]", "")
+    if digitsOnly ~= raw then
+        executeStartBtn.input:SetText(digitsOnly)
+    end
+    local idx = tonumber(digitsOnly)
+    if idx then
+        GuusRaidBuilder_Config.executeStartIndex = math.floor(idx)
+    end
+end
+
+local function CreateExecuteStartButton(parent, anchor)
+    executeStartBtn = CreateFrame("Frame", "GRBExecuteStartControl", parent)
+    executeStartBtn:SetWidth(92)
+    executeStartBtn:SetHeight(22)
+    executeStartBtn:SetPoint("RIGHT", anchor, "LEFT", -4, 0)
+
+    executeStartBtn.lbl = executeStartBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    executeStartBtn.lbl:SetPoint("LEFT", executeStartBtn, "LEFT", 0, 0)
+    executeStartBtn.lbl:SetText("Spawn #")
+    executeStartBtn.lbl:SetTextColor(0.92, 0.87, 0.45)
+
+    executeStartBtn.input = CreateFrame("EditBox", "GRBExecuteStartEditBox", executeStartBtn, "InputBoxTemplate")
+    executeStartBtn.input:SetWidth(28)
+    executeStartBtn.input:SetHeight(20)
+    executeStartBtn.input:SetPoint("RIGHT", executeStartBtn, "RIGHT", 0, 0)
+    executeStartBtn.input:SetAutoFocus(false)
+    executeStartBtn.input:SetMaxLetters(3)
+    executeStartBtn.input:SetFontObject(GameFontNormalSmall)
+    executeStartBtn.input:SetJustifyH("CENTER")
+    executeStartBtn.input:SetScript("OnEnter", GRB_ExecuteStartBtn_OnEnter)
+    executeStartBtn.input:SetScript("OnLeave", GRB_ExecuteStartBtn_OnLeave)
+    executeStartBtn.input:SetScript("OnTextChanged", GRB_ExecuteStartInput_OnTextChanged)
+    executeStartBtn.input:SetScript("OnEnterPressed", GRB_ExecuteStartInput_OnEnterPressed)
+    executeStartBtn.input:SetScript("OnEscapePressed", GRB_ExecuteStartInput_OnEscapePressed)
+    executeStartBtn.input:SetScript("OnEditFocusLost", GRB_ExecuteStartInput_OnEditFocusLost)
+    return executeStartBtn
+end
+
+local function GRB_RightScrollFrame_OnMouseWheel()
+    local d = arg1
+    if not d then return end
+    local sb = getglobal("GRBRightScrollFrameScrollBar")
+    if sb then
+        local mn, mx = sb:GetMinMaxValues()
+        local cv = sb:GetValue()
+        if mn and mx and cv then sb:SetValue(math.min(mx, math.max(mn, cv - d * 28))) end
+    end
+end
+
+local function GRB_TransferBtn_OnClick()
+    SendChatMessage(".z transfer", "SAY")
+end
+
+local function GRB_MainCloseBtn_OnClick()
+    HidePresetPicker()
+    if mainFrame then mainFrame:Hide() end
+end
+
+local function GRB_PresetCycleBtn_OnEnter()
+    presetCycleBtn:SetBackdropColor(0.22, 0.22, 0.36, 0.95)
+    GameTooltip:SetOwner(presetCycleBtn, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Preset", 1, 1, 1)
+    GameTooltip:AddLine("Left-click: next  ·  Right-click: previous", 0.8, 0.8, 0.8, 1)
+    GameTooltip:AddLine("Click ▼ to pick from list", 1, 1, 0.6, 1)
+    GameTooltip:Show()
+end
+
+local function GRB_PresetCycleBtn_OnLeave()
+    presetCycleBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9)
+    GameTooltip:Hide()
+end
+
+local function GRB_PresetCycleBtn_OnClick()
+    local buttonPressed = arg1
+    local names = GetPresetNames()
+    if table.getn(names) == 0 then return end
+    local cur = GuusRaidBuilder_Config.currentPreset
+    local nextName = (buttonPressed == "RightButton")
+        and cyclePrev(names, cur or names[1])
+        or  cycleNext(names, cur or names[1])
+    SwitchPreset(nextName)
+end
+
+local function GRB_PresetDropBtn_OnEnter()
+    presetDropBtn:SetBackdropColor(0.22, 0.22, 0.36, 0.95)
+    GameTooltip:SetOwner(presetDropBtn, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Preset list", 1, 1, 1)
+    GameTooltip:AddLine("Click to pick a preset", 0.8, 0.8, 0.8, 1)
+    GameTooltip:Show()
+end
+
+local function GRB_PresetDropBtn_OnLeave()
+    presetDropBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9)
+    GameTooltip:Hide()
+end
+
+local function GRB_PresetDropBtn_OnClick()
+    TogglePresetPicker(presetCycleBtn)
+end
+
+local function GRB_ExportBtn_OnClick()
+    local name = GuusRaidBuilder_Config.currentPreset
+    if not name then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r No preset selected.")
+        return
+    end
+    ShowExportFrame(name)
+end
+
+local function GRB_ImportBtn_OnClick()
+    ShowImportFrame()
+end
+
+local function GRB_StopBtn_OnClick()
+    GRB_stopRequested = true
+end
+
+local function GRB_ExecBtn_OnEnter()
+    local btn = getglobal("GRBExecBtn")
+    if btn then btn:SetBackdropColor(0.50, 0.40, 0.0, 0.95) end
+end
+
+local function GRB_ExecBtn_OnLeave()
+    local btn = getglobal("GRBExecBtn")
+    if btn then btn:SetBackdropColor(0.35, 0.27, 0.0, 0.95) end
+end
+
+local function GRB_ExecBtn_OnClick()
+    local name = GuusRaidBuilder_Config.currentPreset
+    if name then ExecuteRaid(name) end
 end
 
 -- ============================================================
@@ -718,7 +987,7 @@ local function ShowExportFrame(presetName)
         exportFrame:EnableMouse(true)
         exportFrame:EnableMouseWheel(true)
         exportFrame:SetScript("OnMouseDown", function() exportFrame:StartMoving() end)
-        exportFrame:SetScript("OnMouseUp",   function() exportFrame:StopMovingOrSizing() end)
+        exportFrame:SetScript("OnMouseUp", function() exportFrame:StopMovingOrSizing() end)
         exportFrame:SetScript("OnMouseWheel", function() end)
         exportFrame:SetBackdrop({
             bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -736,7 +1005,6 @@ local function ShowExportFrame(presetName)
         hint:SetText("Paste this block into SM_Extend.lua inside the presets table, then /script hire(\"name\")")
         hint:SetTextColor(0.8, 0.8, 0.5)
 
-        -- Scroll frame for the editbox
         local esf = CreateFrame("ScrollFrame", "GRBExportScroll", exportFrame, "UIPanelScrollFrameTemplate")
         esf:SetWidth(548)
         esf:SetHeight(330)
@@ -751,7 +1019,6 @@ local function ShowExportFrame(presetName)
         exportEditBox:SetTextColor(0.9, 0.95, 0.7)
         esf:SetScrollChild(exportEditBox)
 
-        -- Select All button
         local selBtn = CreateFrame("Button", nil, exportFrame, "UIPanelButtonTemplate")
         selBtn:SetWidth(90)
         selBtn:SetHeight(22)
@@ -762,7 +1029,6 @@ local function ShowExportFrame(presetName)
             exportEditBox:HighlightText()
         end)
 
-        -- Close button
         local ecBtn = CreateFrame("Button", nil, exportFrame, "UIPanelButtonTemplate")
         ecBtn:SetWidth(70)
         ecBtn:SetHeight(22)
@@ -793,16 +1059,15 @@ local function ParseImportText(text)
         return nil, nil, nil, { "Nothing to import." }
     end
 
-    -- Find preset name: matches ["presetName"] = {
     local presetName = string.match(text, '%["(.-)"%]%s*=%s*{')
     if not presetName or trim(presetName) == "" then
         return nil, nil, nil, { 'Could not find preset name. Expected: ["name"] = {' }
     end
     presetName = trim(presetName)
 
-    local slots         = {}
-    local legacySlots   = {}
-    local errors        = {}
+    local slots = {}
+    local legacySlots = {}
+    local errors = {}
     local pendingLegacy = nil
 
     for rawLine in string.gfind(text, "([^\r\n]+)") do
@@ -812,7 +1077,7 @@ local function ParseImportText(text)
         if legacyChar and legacyAcc then
             pendingLegacy = {
                 charName = trim(legacyChar),
-                account  = trim(legacyAcc),
+                account = trim(legacyAcc),
             }
         else
             if string.sub(line, 1, 1) == '"' then
@@ -829,12 +1094,12 @@ local function ParseImportText(text)
             if acc then
                 table.insert(slots, {
                     account = acc,
-                    tier    = tier,
-                    class   = string.lower(class),
-                    role    = string.lower(role),
-                    spec    = string.lower(spec),
-                    race    = string.lower(race),
-                    gender  = string.lower(gender),
+                    tier = tier,
+                    class = string.lower(class),
+                    role = string.lower(role),
+                    spec = string.lower(spec),
+                    race = string.lower(race),
+                    gender = string.lower(gender),
                 })
                 pendingLegacy = nil
             else
@@ -843,8 +1108,8 @@ local function ParseImportText(text)
                 if charName and pendingLegacy and pendingLegacy.account and pendingLegacy.account ~= "" then
                     legacySlots[pendingLegacy.account] = {
                         charName = charName,
-                        role     = string.lower(legacyRole),
-                        spec     = string.lower(legacySpec or ""),
+                        role = string.lower(legacyRole),
+                        spec = string.lower(legacySpec or ""),
                     }
                     pendingLegacy = nil
                 end
@@ -1020,32 +1285,44 @@ end
 -- ============================================================
 
 RefreshSummary = function()
-    if not summaryText then return end
+    if not summaryText or not summaryNameText or not summaryBadges then return end
     local name = GuusRaidBuilder_Config.currentPreset
     if not name then
-        summaryText:SetText("No preset selected — create one with [New]")
+        summaryNameText:SetText("No preset selected")
         summaryText:SetTextColor(0.6, 0.6, 0.6)
+        summaryText:SetText("Create a preset to start building a raid.")
+        for _, badge in pairs(summaryBadges) do
+            if badge.key == "total" then
+                badge.value:SetText("-/40")
+            else
+                badge.value:SetText(badge.prefix .. " -")
+            end
+            badge.value:SetTextColor(0.7, 0.7, 0.7)
+        end
         return
     end
     local s = GetRoleSummary(name)
-    -- Count assigned legacy slots
-    local legacyCount = 0
-    local ls2 = GetPresetLegacySlots(name)
-    for _, v in pairs(ls2) do
-        if v and v.charName and v.charName ~= "" then
-            legacyCount = legacyCount + 1
-        end
+    local remaining = 40 - s.total
+    summaryNameText:SetText("Preset: " .. name)
+    summaryNameText:SetTextColor(1.0, 0.95, 0.60)
+    local selfText = s.selfRole and ("You " .. s.selfRole) or "You total only"
+    summaryText:SetText("Bots " .. s.bots .. "   Legacy " .. s.legacy .. "   " .. selfText .. "   Remaining " .. remaining)
+    summaryText:SetTextColor(0.78, 0.78, 0.84)
+
+    summaryBadges.tank.value:SetText("T " .. tostring(s.tank))
+    summaryBadges.tank.value:SetTextColor(1.0, 0.40, 0.40)
+    summaryBadges.healer.value:SetText("H " .. tostring(s.healer))
+    summaryBadges.healer.value:SetTextColor(0.45, 1.0, 0.45)
+    summaryBadges.rdps.value:SetText("R " .. tostring(s.rdps))
+    summaryBadges.rdps.value:SetTextColor(0.45, 0.70, 1.0)
+    summaryBadges.mdps.value:SetText("M " .. tostring(s.mdps))
+    summaryBadges.mdps.value:SetTextColor(1.0, 0.92, 0.40)
+    summaryBadges.total.value:SetText(tostring(s.total) .. "/40")
+    if s.total >= 40 then
+        summaryBadges.total.value:SetTextColor(1.0, 0.35, 0.35)
+    else
+        summaryBadges.total.value:SetTextColor(1.0, 0.95, 0.55)
     end
-    local combined = s.total + legacyCount
-    local totalColor = combined > 40 and "|cffff2222" or "|cffffffff"
-    summaryText:SetText(
-        "|cffff6666Tanks: "   .. s.tank   .. "|r  "
-        .. "|cff66ff66Healers: " .. s.healer .. "|r  "
-        .. "|cff6699ffRDPS: "    .. s.rdps   .. "|r  "
-        .. "|cffffff66MDPS: "    .. s.mdps   .. "|r  "
-        .. totalColor .. "Total: " .. combined .. "/40|r"
-        .. (legacyCount > 0 and ("  |cffaa55ff(bots:" .. s.total .. " +leg:" .. legacyCount .. ")|r") or "")
-    )
 end
 
 -- ============================================================
@@ -1056,6 +1333,12 @@ RefreshPresetButton = function()
     if not presetCycleBtn then return end
     local name = GuusRaidBuilder_Config.currentPreset
     presetCycleBtn.lbl:SetText(name or "(none)")
+end
+
+RefreshExecuteStartButton = function()
+    if not executeStartBtn or not executeStartBtn.input then return end
+    local idx = GetExecuteStartIndex(GetRunnableSpawnCount(GuusRaidBuilder_Config.currentPreset))
+    executeStartBtn.input:SetText(tostring(idx))
 end
 
 -- ============================================================
@@ -1327,10 +1610,7 @@ RefreshLeftPanel = function()
                 DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r Raid is full (40/40).")
                 return
             end
-            local count = 0
-            for si = 1, table.getn(slots) do
-                if slots[si].account == capturedAcc then count = count + 1 end
-            end
+            local count = GetAccountSlotCount(presetName, capturedAcc)
             if count >= 4 then
                 DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r " .. capturedAcc .. " already has 4 slots (max).")
                 return
@@ -1492,17 +1772,21 @@ RefreshRightPanel = function()
     headerRow:SetWidth(RIGHT_WIDTH - 22)
     headerRow:SetHeight(18)
     headerRow:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
+    headerRow:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
+    headerRow:SetBackdropColor(0.07, 0.08, 0.12, 0.95)
+    headerRow:SetBackdropBorderColor(0.30, 0.32, 0.40, 0.65)
     local hdrKeys   = { "account", "tier", "class", "role", "spec", "race", "gender" }
     local hdrLabels = { "Account", "Tier", "Class", "Role", "Spec", "Race", "Gender" }
     for h = 1, 7 do
         local key   = hdrKeys[h]
         local label = hdrLabels[h]
+        local textPad = (h == 1) and 8 or 1
         local hBtn = CreateFrame("Button", nil, headerRow)
         hBtn:SetWidth(COL_W[h])
         hBtn:SetHeight(18)
         hBtn:SetPoint("TOPLEFT", headerRow, "TOPLEFT", COL_X[h], 0)
         local ht = hBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        ht:SetPoint("TOPLEFT", hBtn, "TOPLEFT", 0, 0)
+        ht:SetPoint("LEFT", hBtn, "LEFT", textPad, -1)
         local function UpdateHdr()
             if GRB_sortKey == key then
                 ht:SetText(label .. (GRB_sortDir == "asc" and " ^" or " v"))
@@ -1537,7 +1821,7 @@ RefreshRightPanel = function()
     spawnHdrBtn:SetHeight(18)
     spawnHdrBtn:SetPoint("TOPLEFT", headerRow, "TOPLEFT", 415, 0)
     local spawnHdrTxt = spawnHdrBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    spawnHdrTxt:SetPoint("TOPLEFT", spawnHdrBtn, "TOPLEFT", 0, 0)
+    spawnHdrTxt:SetPoint("LEFT", spawnHdrBtn, "LEFT", 2, -1)
     local function UpdateSpawnHdr()
         if GRB_sortKey == "_spawn" then
             spawnHdrTxt:SetText("SpawnOrder" .. (GRB_sortDir == "asc" and " ^" or " v"))
@@ -1593,6 +1877,10 @@ RefreshRightPanel = function()
 
     local legacySlots = GetPresetLegacySlots(presetName)
     local accounts    = GuusRaidBuilder_Config.accounts or {}
+    local accToAI     = {}
+    for ai = 1, table.getn(accounts) do
+        accToAI[accounts[ai]] = ai
+    end
     local lastAccount = nil
     local spawnSortActive = (GRB_sortKey == "_spawn")
 
@@ -1610,7 +1898,7 @@ RefreshRightPanel = function()
         table.insert(GRBRightRows, lrow)
 
         local nameLbl = lrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        nameLbl:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[1] + 3, -6)
+        nameLbl:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[1] + 3, -5)
         nameLbl:SetWidth(COL_X[4] - COL_X[1] - 6)
         nameLbl:SetText("* " .. ls.charName)
         nameLbl:SetTextColor(0.80, 0.50, 1.0)
@@ -1622,27 +1910,28 @@ RefreshRightPanel = function()
         for ri = 1, table.getn(roleOpts) do if roleOpts[ri] == ls.role then roleValid = true; break end end
         if not roleValid then ls.role = roleOpts[1] end
 
-        local roleBtn = MakeCycleBtn(lrow, "GRBLegacyRole"..ai, COL_W[4], ROW_HEIGHT - 4,
+        local roleBtn = MakeCycleBtn(lrow, "GRBLegacyRole"..ai, COL_W[4], ROW_HEIGHT - 2,
             roleOpts, ls.role,
             function(v)
                 legacySlots[capturedAcc].role = v
                 local sp = GetSpecs(string.lower(GetAccountClass(capturedAcc) or "warrior"))
                 legacySlots[capturedAcc].spec = sp[1]
+                RefreshSummary()
                 RefreshRightPanel()
             end, "Role")
-        roleBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[4], -2)
+        roleBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[4], -1)
 
         local specOpts = GetSpecs(charClass)
         local specValid2 = false
         for si = 1, table.getn(specOpts) do if specOpts[si] == (ls.spec or "") then specValid2 = true; break end end
         if not specValid2 then ls.spec = specOpts[1] end
-        local specBtn = MakeCycleBtn(lrow, "GRBLegacySpec"..ai, COL_W[5], ROW_HEIGHT - 4,
+        local specBtn = MakeCycleBtn(lrow, "GRBLegacySpec"..ai, COL_W[5], ROW_HEIGHT - 2,
             specOpts, ls.spec,
             function(v) legacySlots[capturedAcc].spec = v end, "Spec")
-        specBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[5], -2)
+        specBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[5], -1)
 
         local fillerLbl = lrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        fillerLbl:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[3] + 2, -6)
+        fillerLbl:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[3] + 2, -5)
         fillerLbl:SetWidth(COL_X[4] - COL_X[3] - 4)
         local displayClass = string.upper(string.sub(charClass, 1, 1)) .. string.sub(charClass, 2)
         local cc = GRB_CLASS_COLORS[displayClass] or {0.70, 0.50, 0.90}
@@ -1650,8 +1939,8 @@ RefreshRightPanel = function()
         fillerLbl:SetTextColor(cc[1], cc[2], cc[3])
 
         local lremBtn = CreateFrame("Button", "GRBLegacyRem"..ai, lrow)
-        lremBtn:SetWidth(COL_W[8]) ; lremBtn:SetHeight(ROW_HEIGHT - 4)
-        lremBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[8], -2)
+        lremBtn:SetWidth(COL_W[8]) ; lremBtn:SetHeight(ROW_HEIGHT - 2)
+        lremBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", COL_X[8], -1)
         lremBtn:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=10, insets={left=2,right=2,top=2,bottom=2} })
         lremBtn:SetBackdropColor(0.40, 0.08, 0.08, 0.9) ; lremBtn:SetBackdropBorderColor(0.70, 0.20, 0.20, 0.8)
         local lremTxt = lremBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1662,11 +1951,11 @@ RefreshRightPanel = function()
 
         -- Spawn badge + up/down
         local lBadge = lrow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        lBadge:SetPoint("TOPLEFT", lrow, "TOPLEFT", 420, -6) ; lBadge:SetWidth(28)
+        lBadge:SetPoint("TOPLEFT", lrow, "TOPLEFT", 420, -5) ; lBadge:SetWidth(28)
         lBadge:SetText(tostring(lSpawnPos + 1)) ; lBadge:SetTextColor(0.80, 0.50, 1.0)
         local lupBtn = CreateFrame("Button", nil, lrow)
-        lupBtn:SetWidth(18) ; lupBtn:SetHeight(ROW_HEIGHT - 4)
-        lupBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", 450, -2)
+        lupBtn:SetWidth(18) ; lupBtn:SetHeight(ROW_HEIGHT - 2)
+        lupBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", 450, -1)
         lupBtn:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
         lupBtn:SetBackdropColor(0.1, 0.05, 0.15, 0.85) ; lupBtn:SetBackdropBorderColor(0.5, 0.3, 0.7, 0.6)
         local lupTxt = lupBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1679,8 +1968,8 @@ RefreshRightPanel = function()
             RefreshRightPanel()
         end)
         local ldnBtn = CreateFrame("Button", nil, lrow)
-        ldnBtn:SetWidth(18) ; ldnBtn:SetHeight(ROW_HEIGHT - 4)
-        ldnBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", 470, -2)
+        ldnBtn:SetWidth(18) ; ldnBtn:SetHeight(ROW_HEIGHT - 2)
+        ldnBtn:SetPoint("TOPLEFT", lrow, "TOPLEFT", 470, -1)
         ldnBtn:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
         ldnBtn:SetBackdropColor(0.1, 0.05, 0.15, 0.85) ; ldnBtn:SetBackdropBorderColor(0.5, 0.3, 0.7, 0.6)
         local ldnTxt = ldnBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1693,7 +1982,7 @@ RefreshRightPanel = function()
             RefreshRightPanel()
         end)
 
-        yOffset = yOffset - ROW_HEIGHT - 2
+        yOffset = yOffset - ROW_HEIGHT - 1
     end
 
     -- --------------------------------------------------------
@@ -1708,18 +1997,24 @@ RefreshRightPanel = function()
         row:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
         row:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=10, insets={left=2,right=2,top=2,bottom=2} })
         row:SetBackdropColor(bg[1], bg[2], bg[3], bg[4])
-        row:SetBackdropBorderColor(0.38, 0.38, 0.48, 0.55)
+        row:SetBackdropBorderColor(0.26, 0.28, 0.36, 0.55)
         table.insert(GRBRightRows, row)
 
+        local accent = row:CreateTexture(nil, "ARTWORK")
+        accent:SetWidth(4)
+        accent:SetHeight(ROW_HEIGHT - 6)
+        accent:SetPoint("LEFT", row, "LEFT", 1, 0)
+        accent:SetTexture(bg[1] + 0.10, bg[2] + 0.10, bg[3] + 0.10, 0.95)
+
         local accLbl = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        accLbl:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[1] + 3, -6)
-        accLbl:SetWidth(COL_W[1] - 3) ; accLbl:SetText(acc) ; accLbl:SetTextColor(0.55, 0.55, 0.65)
+        accLbl:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[1] + 3, -5)
+        accLbl:SetWidth(COL_W[1] - 3) ; accLbl:SetText(acc) ; accLbl:SetTextColor(0.85, 0.87, 0.92)
 
         local capturedI = i
 
-        local tierBtn = MakeCycleBtn(row, "GRBTier" .. i, COL_W[2], ROW_HEIGHT - 4,
+        local tierBtn = MakeCycleBtn(row, "GRBTier" .. i, COL_W[2], ROW_HEIGHT - 2,
             TIERS, slot.tier or "t2r", function(v) slots[capturedI].tier = v end, "Tier")
-        tierBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[2], -2)
+        tierBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[2], -1)
 
         local classOpts = GetClassesForAccount(acc)
         if not IsClassValidForAccount(slot.class, acc) then
@@ -1727,7 +2022,7 @@ RefreshRightPanel = function()
             if not IsRoleValidForClass(slot.role, slot.class) then slot.role = GetClassRoles(slot.class)[1] end
             slot.spec = GetSpecs(slot.class)[1]
         end
-        local classBtn = MakeCycleBtn(row, "GRBClass" .. i, COL_W[3], ROW_HEIGHT - 4,
+        local classBtn = MakeCycleBtn(row, "GRBClass" .. i, COL_W[3], ROW_HEIGHT - 2,
             classOpts, slot.class or classOpts[1],
             function(v)
                 slots[capturedI].class = v
@@ -1735,22 +2030,22 @@ RefreshRightPanel = function()
                 slots[capturedI].spec = GetSpecs(v)[1]
                 RefreshRightPanel()
             end, "Class")
-        classBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[3], -2)
+        classBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[3], -1)
 
         local roleOpts = GetClassRoles(slot.class or "warrior")
         if not IsRoleValidForClass(slot.role, slot.class) then slot.role = roleOpts[1] end
-        local roleBtn = MakeCycleBtn(row, "GRBRole" .. i, COL_W[4], ROW_HEIGHT - 4,
+        local roleBtn = MakeCycleBtn(row, "GRBRole" .. i, COL_W[4], ROW_HEIGHT - 2,
             roleOpts, slot.role,
             function(v) slots[capturedI].role = v ; RefreshSummary() ; RefreshRightPanel() end, "Role")
-        roleBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[4], -2)
+        roleBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[4], -1)
 
         local specOpts = GetSpecs(slot.class or "warrior")
         local specValid = false
         for si = 1, table.getn(specOpts) do if specOpts[si] == slot.spec then specValid = true; break end end
         if not specValid then slot.spec = specOpts[1] end
-        local specBtn = MakeCycleBtn(row, "GRBSpec" .. i, COL_W[5], ROW_HEIGHT - 4,
+        local specBtn = MakeCycleBtn(row, "GRBSpec" .. i, COL_W[5], ROW_HEIGHT - 2,
             specOpts, slot.spec, function(v) slots[capturedI].spec = v end, "Spec")
-        specBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[5], -2)
+        specBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[5], -1)
 
         local raceOpts = GetRacesForAccount(acc, slot.class)
         local displayRace = slot.race
@@ -1758,17 +2053,17 @@ RefreshRightPanel = function()
             displayRace = raceOpts[1]
             slot.race = displayRace  -- fix saved data too, but only after faction is known
         end
-        local raceBtn = MakeCycleBtn(row, "GRBRace" .. i, COL_W[6], ROW_HEIGHT - 4,
+        local raceBtn = MakeCycleBtn(row, "GRBRace" .. i, COL_W[6], ROW_HEIGHT - 2,
             raceOpts, displayRace, function(v) slots[capturedI].race = v end, "Race")
-        raceBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[6], -2)
+        raceBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[6], -1)
 
-        local genderBtn = MakeCycleBtn(row, "GRBGender" .. i, COL_W[7], ROW_HEIGHT - 4,
+        local genderBtn = MakeCycleBtn(row, "GRBGender" .. i, COL_W[7], ROW_HEIGHT - 2,
             GENDERS, slot.gender or "male", function(v) slots[capturedI].gender = v end, "Gender")
-        genderBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[7], -2)
+        genderBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[7], -1)
 
         local remBtn = CreateFrame("Button", "GRBRem" .. i, row)
-        remBtn:SetWidth(COL_W[8]) ; remBtn:SetHeight(ROW_HEIGHT - 4)
-        remBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[8], -2)
+        remBtn:SetWidth(COL_W[8]) ; remBtn:SetHeight(ROW_HEIGHT - 2)
+        remBtn:SetPoint("TOPLEFT", row, "TOPLEFT", COL_X[8], -1)
         remBtn:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=10, insets={left=2,right=2,top=2,bottom=2} })
         remBtn:SetBackdropColor(0.40, 0.08, 0.08, 0.9) ; remBtn:SetBackdropBorderColor(0.70, 0.20, 0.20, 0.8)
         local remTxt = remBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1777,13 +2072,12 @@ RefreshRightPanel = function()
         remBtn:SetScript("OnLeave", function() remBtn:SetBackdropColor(0.40, 0.08, 0.08, 0.9) end)
         remBtn:SetScript("OnClick", function() table.remove(slots, capturedI) ; RefreshAll() end)
 
-        -- Spawn badge + up/down
         local spawnBadge = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        spawnBadge:SetPoint("TOPLEFT", row, "TOPLEFT", 420, -6) ; spawnBadge:SetWidth(28)
+        spawnBadge:SetPoint("TOPLEFT", row, "TOPLEFT", 420, -5) ; spawnBadge:SetWidth(28)
         spawnBadge:SetText(tostring(spawnPos + 1)) ; spawnBadge:SetTextColor(1.0, 0.9, 0.35)
         local upBtn = CreateFrame("Button", nil, row)
-        upBtn:SetWidth(18) ; upBtn:SetHeight(ROW_HEIGHT - 4)
-        upBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 450, -2)
+        upBtn:SetWidth(18) ; upBtn:SetHeight(ROW_HEIGHT - 2)
+        upBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 450, -1)
         upBtn:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
         upBtn:SetBackdropColor(0.1, 0.1, 0.15, 0.85) ; upBtn:SetBackdropBorderColor(0.4, 0.4, 0.5, 0.6)
         local upTxt = upBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1796,8 +2090,8 @@ RefreshRightPanel = function()
             RefreshRightPanel()
         end)
         local dnBtn = CreateFrame("Button", nil, row)
-        dnBtn:SetWidth(18) ; dnBtn:SetHeight(ROW_HEIGHT - 4)
-        dnBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 470, -2)
+        dnBtn:SetWidth(18) ; dnBtn:SetHeight(ROW_HEIGHT - 2)
+        dnBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 470, -1)
         dnBtn:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
         dnBtn:SetBackdropColor(0.1, 0.1, 0.15, 0.85) ; dnBtn:SetBackdropBorderColor(0.4, 0.4, 0.5, 0.6)
         local dnTxt = dnBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1810,24 +2104,17 @@ RefreshRightPanel = function()
             RefreshRightPanel()
         end)
 
-        yOffset = yOffset - ROW_HEIGHT - 2
+        yOffset = yOffset - ROW_HEIGHT - 1
     end
 
-    -- --------------------------------------------------------
-    -- Build an index from account name to ai for legacy lookup
-    -- --------------------------------------------------------
-    local accToAI = {}
-    for ai = 1, table.getn(accounts) do accToAI[accounts[ai]] = ai end
-
     if spawnSortActive then
-        -- ---- SPAWN ORDER MODE: unified list from spawnOrder ----
         local playerName  = UnitName("player") or "You"
         local playerClass = GuusRaidBuilder_Config.accountClasses and GuusRaidBuilder_Config.accountClasses[playerName]
         local pcc         = playerClass and GRB_CLASS_COLORS[playerClass] or {0.9, 0.9, 1.0}
 
         -- Group 1 header
         local g1Div = CreateFrame("Frame", nil, rightScrollContent)
-        g1Div:SetWidth(RIGHT_WIDTH - 22) ; g1Div:SetHeight(17)
+        g1Div:SetWidth(RIGHT_WIDTH - 22) ; g1Div:SetHeight(15)
         g1Div:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
         g1Div:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
         g1Div:SetBackdropColor(0.05, 0.12, 0.05, 0.97) ; g1Div:SetBackdropBorderColor(0.30, 0.55, 0.30, 0.70)
@@ -1836,7 +2123,7 @@ RefreshRightPanel = function()
         g1Txt:SetText("Group 1  (you + spawn 2-5)")
         g1Txt:SetTextColor(0.50, 1.0, 0.50)
         table.insert(GRBRightRows, g1Div)
-        yOffset = yOffset - 19
+        yOffset = yOffset - 17
 
         -- Player placeholder row
         local prow = CreateFrame("Frame", nil, rightScrollContent)
@@ -1853,10 +2140,21 @@ RefreshRightPanel = function()
         local pSlotTxt = prow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         pSlotTxt:SetPoint("LEFT", prow, "LEFT", 420, 0)
         pSlotTxt:SetText("1") ; pSlotTxt:SetTextColor(1.0, 0.9, 0.35)
-        yOffset = yOffset - ROW_HEIGHT - 2
+        yOffset = yOffset - ROW_HEIGHT - 1
 
         -- Walk spawnOrder, rendering each item in sequence
         local spawnTotal = table.getn(spawnOrder)
+        if spawnTotal == 0 and table.getn(displayOrder) > 0 then
+            for di = 1, table.getn(displayOrder) do
+                local idx = displayOrder[di]
+                local slot = slots[idx]
+                if slot and slot.uid then
+                    table.insert(spawnOrder, "b:" .. slot.uid)
+                    slotByToken["b:" .. slot.uid] = slot
+                end
+            end
+            spawnTotal = table.getn(spawnOrder)
+        end
         for soi = 1, spawnTotal do
             local token = spawnOrder[soi]
             -- Group divider: group 1 has 4 slots (soi 1-4), groups 2+ have 5 slots each
@@ -1865,7 +2163,7 @@ RefreshRightPanel = function()
                 -- start of group 2 (soi==5 after 4 bot/legacy slots)
                 local groupNum   = 2
                 local div = CreateFrame("Frame", nil, rightScrollContent)
-                div:SetWidth(RIGHT_WIDTH - 22) ; div:SetHeight(17)
+                div:SetWidth(RIGHT_WIDTH - 22) ; div:SetHeight(15)
                 div:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
                 div:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
                 div:SetBackdropColor(0.05, 0.12, 0.05, 0.97) ; div:SetBackdropBorderColor(0.30, 0.55, 0.30, 0.70)
@@ -1874,12 +2172,12 @@ RefreshRightPanel = function()
                 divTxt:SetText("Group " .. groupNum .. "  (spawn " .. (soi + 1) .. "-" .. math.min(soi + 5, spawnTotal + 1) .. ")")
                 divTxt:SetTextColor(0.50, 1.0, 0.50)
                 table.insert(GRBRightRows, div)
-                yOffset = yOffset - 19
+                yOffset = yOffset - 17
             elseif soi > 5 and math.mod(soi - 5, 5) == 0 then
                 -- groups 3, 4, 5... each 5 slots starting at soi=10, 15...
                 local groupNum = math.floor((soi - 5) / 5) + 2
                 local div = CreateFrame("Frame", nil, rightScrollContent)
-                div:SetWidth(RIGHT_WIDTH - 22) ; div:SetHeight(17)
+                div:SetWidth(RIGHT_WIDTH - 22) ; div:SetHeight(15)
                 div:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
                 div:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
                 div:SetBackdropColor(0.05, 0.12, 0.05, 0.97) ; div:SetBackdropBorderColor(0.30, 0.55, 0.30, 0.70)
@@ -1888,7 +2186,7 @@ RefreshRightPanel = function()
                 divTxt:SetText("Group " .. groupNum .. "  (spawn " .. (soi + 1) .. "-" .. math.min(soi + 5, spawnTotal + 1) .. ")")
                 divTxt:SetTextColor(0.50, 1.0, 0.50)
                 table.insert(GRBRightRows, div)
-                yOffset = yOffset - 19
+                yOffset = yOffset - 17
             end
 
             if string.sub(token, 1, 2) == "b:" then
@@ -1969,7 +2267,7 @@ RefreshRightPanel = function()
             if acc ~= lastAccount then
                 GRB_accountTopY[string.lower(acc)] = -yOffset
                 local div = CreateFrame("Frame", nil, rightScrollContent)
-                div:SetWidth(RIGHT_WIDTH - 22) ; div:SetHeight(17)
+                div:SetWidth(RIGHT_WIDTH - 22) ; div:SetHeight(15)
                 div:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
                 div:SetBackdrop({ bgFile="Interface\\Tooltips\\UI-Tooltip-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=8, insets={left=2,right=2,top=2,bottom=2} })
                 div:SetBackdropColor(0.07, 0.07, 0.10, 0.97) ; div:SetBackdropBorderColor(0.38, 0.38, 0.48, 0.55)
@@ -1977,7 +2275,7 @@ RefreshRightPanel = function()
                 divTxt:SetPoint("LEFT", div, "LEFT", 6, 0)
                 divTxt:SetText(acc) ; divTxt:SetTextColor(0.95, 0.88, 0.45)
                 table.insert(GRBRightRows, div)
-                yOffset = yOffset - 19
+                yOffset = yOffset - 17
                 lastAccount = acc
             end
 
@@ -2002,14 +2300,14 @@ RefreshRightPanel = function()
     yOffset = yOffset - 10
     local labelFrame = CreateFrame("Frame", nil, rightScrollContent)
     labelFrame:SetWidth(RIGHT_WIDTH - 22)
-    labelFrame:SetHeight(18)
+    labelFrame:SetHeight(16)
     labelFrame:SetPoint("TOPLEFT", rightScrollContent, "TOPLEFT", 2, yOffset)
     local labelTxt = labelFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     labelTxt:SetPoint("TOPLEFT", labelFrame, "TOPLEFT", 2, 0)
     labelTxt:SetText("Add slot for:")
     labelTxt:SetTextColor(0.55, 0.55, 0.55)
     table.insert(GRBRightRows, labelFrame)
-    yOffset = yOffset - 22
+    yOffset = yOffset - 20
 
     local accounts = GuusRaidBuilder_Config.accounts or {}
     local xBtn = 4
@@ -2040,10 +2338,7 @@ RefreshRightPanel = function()
                 DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r Raid is full (40/40).")
                 return
             end
-            local count = 0
-            for si = 1, table.getn(slots) do
-                if slots[si].account == capturedAcc then count = count + 1 end
-            end
+            local count = GetAccountSlotCount(presetName, capturedAcc)
             if count >= 4 then
                 DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r " .. capturedAcc .. " already has 4 slots (max).")
                 return
@@ -2060,14 +2355,14 @@ RefreshRightPanel = function()
         end
     end
 
-    yOffset = yOffset - 30
+    yOffset = yOffset - 42
 
     -- Update scroll content height and scrollbar range
-    local totalH = math.max(SCROLL_HEIGHT, -yOffset + 20)
+    local totalH = math.max(SCROLL_HEIGHT - 14, -yOffset + 32)
     rightScrollContent:SetHeight(totalH)
     local rsb = getglobal("GRBRightScrollFrameScrollBar")
     if rsb then
-        rsb:SetMinMaxValues(0, math.max(0, totalH - SCROLL_HEIGHT))
+        rsb:SetMinMaxValues(0, math.max(0, totalH - (SCROLL_HEIGHT - 14)))
     end
 end
 
@@ -2077,6 +2372,7 @@ end
 
 RefreshAll = function()
     RefreshPresetButton()
+    RefreshExecuteStartButton()
     RefreshSummary()
     RefreshLeftPanel()
     RefreshRightPanel()
@@ -2089,7 +2385,7 @@ end
 local SwitchPreset
 local GRB_PresetPickerRows = {}
 
-local function HidePresetPicker()
+HidePresetPicker = function()
     if GRB_PresetPickerFrame then GRB_PresetPickerFrame:Hide() end
 end
 
@@ -2185,7 +2481,7 @@ local function BuildPresetPickerList()
     GRB_PresetPickerFrame:SetWidth(width + 6)
 end
 
-local function TogglePresetPicker(anchor)
+TogglePresetPicker = function(anchor)
     local names = GetPresetNames()
     if table.getn(names) == 0 then return end
 
@@ -2248,6 +2544,134 @@ local function CreatePreset(name)
     SwitchPreset(name)
 end
 
+local function BuildMainPanels(TOP_Y)
+    -- ===== SUMMARY BAR =====
+    summaryBar = CreateFrame("Frame", nil, mainFrame)
+    summaryBar:SetWidth(WINDOW_WIDTH - 28)
+    summaryBar:SetHeight(44)
+    summaryBar:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 14, TOP_Y - 34)
+    summaryBar:SetBackdrop({
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 }
+    })
+    summaryBar:SetBackdropColor(0.06, 0.07, 0.11, 0.88)
+    summaryBar:SetBackdropBorderColor(0.28, 0.30, 0.40, 0.60)
+
+    summaryNameText = summaryBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    summaryNameText:SetPoint("TOPLEFT", summaryBar, "TOPLEFT", 8, -7)
+    summaryNameText:SetText("No preset selected")
+    summaryNameText:SetTextColor(0.75, 0.75, 0.78)
+
+    summaryText = summaryBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    summaryText:SetPoint("BOTTOMLEFT", summaryBar, "BOTTOMLEFT", 8, 8)
+    summaryText:SetText("Create a preset to start building a raid.")
+    summaryText:SetTextColor(0.7, 0.7, 0.7)
+
+    summaryBadges = {}
+    local badgeDefs = {
+        { key = "tank",   label = "T",     value = "0",    color = {1.0, 0.40, 0.40} },
+        { key = "healer", label = "H",     value = "0",    color = {0.45, 1.0, 0.45} },
+        { key = "rdps",   label = "R",     value = "0",    color = {0.45, 0.70, 1.0} },
+        { key = "mdps",   label = "M",     value = "0",    color = {1.0, 0.92, 0.40} },
+        { key = "total",  label = "Total", value = "0/40", color = {1.0, 0.95, 0.55} },
+    }
+    local badgeRight = -8
+    for bi = table.getn(badgeDefs), 1, -1 do
+        local def = badgeDefs[bi]
+        local badge = CreateFrame("Frame", nil, summaryBar)
+        badge:SetWidth(def.key == "total" and 72 or 52)
+        badge:SetHeight(28)
+        badge:SetPoint("RIGHT", summaryBar, "RIGHT", badgeRight, 0)
+        badge:SetBackdrop({
+            bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 8,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 }
+        })
+        badge:SetBackdropColor(0.11, 0.12, 0.18, 0.92)
+        badge:SetBackdropBorderColor(def.color[1] * 0.55, def.color[2] * 0.55, def.color[3] * 0.55, 0.8)
+        badge.key = def.key
+        badge.prefix = def.label
+
+        local label = badge:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        label:SetPoint("TOP", badge, "TOP", 0, -4)
+        label:SetText(def.label)
+        label:SetTextColor(def.color[1], def.color[2], def.color[3])
+        label:Hide()
+
+        local value = badge:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        value:SetPoint("CENTER", badge, "CENTER", 0, 0)
+        value:SetText(def.value)
+        value:SetTextColor(def.color[1], def.color[2], def.color[3])
+
+        badge.label = label
+        badge.value = value
+        summaryBadges[def.key] = badge
+        badgeRight = badgeRight - badge:GetWidth() - 4
+    end
+
+    local sep = mainFrame:CreateTexture(nil, "BACKGROUND")
+    sep:SetWidth(WINDOW_WIDTH - 28); sep:SetHeight(1)
+    sep:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 13, TOP_Y - 82)
+    sep:SetTexture(0.35, 0.35, 0.45, 0.55)
+
+    local PANEL_TOP = TOP_Y - 86
+
+    local leftHdr = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    leftHdr:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 14, PANEL_TOP)
+    leftHdr:SetText("Accounts")
+    leftHdr:SetTextColor(0.92, 0.87, 0.45)
+
+    leftScrollFrame = CreateFrame("ScrollFrame", "GRBLeftScrollFrame", mainFrame, "UIPanelScrollFrameTemplate")
+    leftScrollFrame:SetWidth(LEFT_WIDTH - 5)
+    leftScrollFrame:SetHeight(SCROLL_HEIGHT)
+    leftScrollFrame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 13, PANEL_TOP - 18)
+    leftScrollFrame:EnableMouseWheel(true)
+    leftScrollFrame:SetScript("OnMouseWheel", function()
+        local d = arg1
+        if not d then return end
+        local sb = getglobal("GRBLeftScrollFrameScrollBar")
+        if sb then
+            local mn, mx = sb:GetMinMaxValues()
+            local cv = sb:GetValue()
+            if mn and mx and cv then sb:SetValue(math.min(mx, math.max(mn, cv - d * 28))) end
+        end
+    end)
+    leftScrollContent = CreateFrame("Frame", "GRBLeftScrollContent", leftScrollFrame)
+    leftScrollContent:SetWidth(LEFT_WIDTH - 25)
+    leftScrollContent:SetHeight(800)
+    leftScrollFrame:SetScrollChild(leftScrollContent)
+
+    local vSep = mainFrame:CreateTexture(nil, "BACKGROUND")
+    vSep:SetWidth(1); vSep:SetHeight(SCROLL_HEIGHT + 20)
+    vSep:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", LEFT_WIDTH + 14, PANEL_TOP)
+    vSep:SetTexture(0.35, 0.35, 0.45, 0.50)
+
+    rightScrollFrame = CreateFrame("ScrollFrame", "GRBRightScrollFrame", mainFrame, "UIPanelScrollFrameTemplate")
+    rightScrollFrame:SetWidth(RIGHT_WIDTH - 5)
+    rightScrollFrame:SetHeight(SCROLL_HEIGHT - 14)
+    rightScrollFrame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", LEFT_WIDTH + 19, PANEL_TOP - 24)
+    rightScrollFrame:EnableMouseWheel(true)
+    rightScrollFrame:SetScript("OnMouseWheel", GRB_RightScrollFrame_OnMouseWheel)
+    rightScrollContent = CreateFrame("Frame", "GRBRightScrollContent", rightScrollFrame)
+    rightScrollContent:SetWidth(RIGHT_WIDTH - 25)
+    rightScrollContent:SetHeight(2000)
+    rightScrollFrame:SetScrollChild(rightScrollContent)
+
+    local rightHdr = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    rightHdr:SetPoint("BOTTOMLEFT", rightScrollFrame, "TOPLEFT", 4, 6)
+    rightHdr:SetText("Raid Composition")
+    rightHdr:SetTextColor(0.92, 0.87, 0.45)
+
+    local transferBtn = CreateFrame("Button", "GRBTransferBtn", mainFrame, "UIPanelButtonTemplate")
+    transferBtn:SetWidth(90); transferBtn:SetHeight(22)
+    transferBtn:SetPoint("BOTTOMLEFT", mainFrame, "BOTTOMLEFT", 14, 12)
+    transferBtn:SetText("Transfer")
+    transferBtn:SetScript("OnClick", GRB_TransferBtn_OnClick)
+end
+
 -- ============================================================
 -- MAIN GUI
 -- ============================================================
@@ -2286,25 +2710,53 @@ local function CreateMainGUI()
     closeBtn:SetNormalTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Up")
     closeBtn:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight")
     closeBtn:SetPushedTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Down")
-    closeBtn:SetScript("OnClick", function() HidePresetPicker(); mainFrame:Hide() end)
+    closeBtn:SetScript("OnClick", GRB_MainCloseBtn_OnClick)
 
     -- ===== TOP BAR Y = -32 =====
     local TOP_Y = -32
 
+    local topBar = CreateFrame("Frame", nil, mainFrame)
+    topBar:SetWidth(WINDOW_WIDTH - 28)
+    topBar:SetHeight(28)
+    topBar:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 14, TOP_Y + 2)
+    topBar:SetBackdrop({
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 }
+    })
+    topBar:SetBackdropColor(0.08, 0.09, 0.14, 0.82)
+    topBar:SetBackdropBorderColor(0.28, 0.30, 0.40, 0.55)
+
+    local presetGroup = CreateFrame("Frame", nil, topBar)
+    presetGroup:SetWidth(330)
+    presetGroup:SetHeight(24)
+    presetGroup:SetPoint("LEFT", topBar, "LEFT", 6, 0)
+
+    local ioGroup = CreateFrame("Frame", nil, topBar)
+    ioGroup:SetWidth(116)
+    ioGroup:SetHeight(24)
+    ioGroup:SetPoint("LEFT", topBar, "LEFT", 365, 0)
+
+    local actionGroup = CreateFrame("Frame", nil, topBar)
+    actionGroup:SetWidth(266)
+    actionGroup:SetHeight(24)
+    actionGroup:SetPoint("RIGHT", topBar, "RIGHT", -6, 0)
+
     -- "Preset:" label
-    local pLbl = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    pLbl:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 15, TOP_Y)
+    local pLbl = presetGroup:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    pLbl:SetPoint("LEFT", presetGroup, "LEFT", 0, 0)
     pLbl:SetText("Preset:")
 
 -- Preset cycle button
-    presetCycleBtn = CreateFrame("Button", "GRBPresetCycleBtn", mainFrame)
+    presetCycleBtn = CreateFrame("Button", "GRBPresetCycleBtn", presetGroup)
     
     -- Tell the Preset button to listen for Right Clicks!
     presetCycleBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     
     presetCycleBtn:SetWidth(100)
     presetCycleBtn:SetHeight(22)
-    presetCycleBtn:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 63, TOP_Y)
+    presetCycleBtn:SetPoint("LEFT", pLbl, "RIGHT", 8, 0)
     presetCycleBtn:SetBackdrop({
         bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -2317,32 +2769,11 @@ local function CreateMainGUI()
     presetCycleBtn.lbl:SetPoint("CENTER", presetCycleBtn, "CENTER", 0, 0)
     presetCycleBtn.lbl:SetText("(none)")
     presetCycleBtn.lbl:SetTextColor(1, 1, 0.65)
-    presetCycleBtn:SetScript("OnEnter", function()
-        presetCycleBtn:SetBackdropColor(0.22, 0.22, 0.36, 0.95)
-        GameTooltip:SetOwner(presetCycleBtn, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Preset", 1, 1, 1)
-        GameTooltip:AddLine("Left-click: next  ·  Right-click: previous", 0.8, 0.8, 0.8, 1)
-        GameTooltip:AddLine("Click ▼ to pick from list", 1, 1, 0.6, 1)
-        GameTooltip:Show()
-    end)
-    presetCycleBtn:SetScript("OnLeave", function()
-        presetCycleBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9)
-        GameTooltip:Hide()
-    end)
-    
-    -- Change the function signature to capture arg1
-    presetCycleBtn:SetScript("OnClick", function()
-        local buttonPressed = arg1
-        local names = GetPresetNames()
-        if table.getn(names) == 0 then return end
-        local cur = GuusRaidBuilder_Config.currentPreset
-        local nextName = (buttonPressed == "RightButton")
-            and cyclePrev(names, cur or names[1])
-            or  cycleNext(names, cur or names[1])
-        SwitchPreset(nextName)
-    end)
+    presetCycleBtn:SetScript("OnEnter", GRB_PresetCycleBtn_OnEnter)
+    presetCycleBtn:SetScript("OnLeave", GRB_PresetCycleBtn_OnLeave)
+    presetCycleBtn:SetScript("OnClick", GRB_PresetCycleBtn_OnClick)
 
-    presetDropBtn = CreateFrame("Button", "GRBPresetDropBtn", mainFrame)
+    presetDropBtn = CreateFrame("Button", "GRBPresetDropBtn", presetGroup)
     presetDropBtn:SetWidth(18)
     presetDropBtn:SetHeight(22)
     presetDropBtn:SetPoint("TOPLEFT", presetCycleBtn, "TOPRIGHT", 1, 0)
@@ -2358,23 +2789,12 @@ local function CreateMainGUI()
     dropLbl:SetPoint("CENTER", presetDropBtn, "CENTER", 0, 1)
     dropLbl:SetText("v")
     dropLbl:SetTextColor(0.85, 0.85, 1.0)
-    presetDropBtn:SetScript("OnEnter", function()
-        presetDropBtn:SetBackdropColor(0.22, 0.22, 0.36, 0.95)
-        GameTooltip:SetOwner(presetDropBtn, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Preset list", 1, 1, 1)
-        GameTooltip:AddLine("Click to pick a preset", 0.8, 0.8, 0.8, 1)
-        GameTooltip:Show()
-    end)
-    presetDropBtn:SetScript("OnLeave", function()
-        presetDropBtn:SetBackdropColor(0.12, 0.12, 0.22, 0.9)
-        GameTooltip:Hide()
-    end)
-    presetDropBtn:SetScript("OnClick", function()
-        TogglePresetPicker(presetCycleBtn)
-    end)
+    presetDropBtn:SetScript("OnEnter", GRB_PresetDropBtn_OnEnter)
+    presetDropBtn:SetScript("OnLeave", GRB_PresetDropBtn_OnLeave)
+    presetDropBtn:SetScript("OnClick", GRB_PresetDropBtn_OnClick)
 
     -- [New]
-    local newBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+    local newBtn = CreateFrame("Button", nil, presetGroup, "UIPanelButtonTemplate")
     newBtn:SetWidth(42); newBtn:SetHeight(20)
     newBtn:SetPoint("TOPLEFT", presetDropBtn, "TOPRIGHT", 4, 0)
     newBtn:SetText("New")
@@ -2420,7 +2840,7 @@ local function CreateMainGUI()
     end)
 
     -- [Delete]
-    local delBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+    local delBtn = CreateFrame("Button", nil, presetGroup, "UIPanelButtonTemplate")
     delBtn:SetWidth(48); delBtn:SetHeight(20)
     delBtn:SetPoint("TOPLEFT", newBtn, "TOPRIGHT", 3, 0)
     delBtn:SetText("Delete")
@@ -2438,7 +2858,7 @@ local function CreateMainGUI()
     end)
 
     -- [Rename]
-    local renameBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+    local renameBtn = CreateFrame("Button", nil, presetGroup, "UIPanelButtonTemplate")
     renameBtn:SetWidth(54); renameBtn:SetHeight(20)
     renameBtn:SetPoint("TOPLEFT", delBtn, "TOPRIGHT", 3, 0)
     renameBtn:SetText("Rename")
@@ -2495,32 +2915,23 @@ local function CreateMainGUI()
     end)
 
     -- [Export]
-    local exportBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+    local exportBtn = CreateFrame("Button", nil, ioGroup, "UIPanelButtonTemplate")
     exportBtn:SetWidth(52); exportBtn:SetHeight(20)
-    exportBtn:SetPoint("TOPLEFT", renameBtn, "TOPRIGHT", 3, 0)
+    exportBtn:SetPoint("LEFT", ioGroup, "LEFT", 0, 0)
     exportBtn:SetText("Export")
-    exportBtn:SetScript("OnClick", function()
-        local name = GuusRaidBuilder_Config.currentPreset
-        if not name then
-            DEFAULT_CHAT_FRAME:AddMessage("|cffff0000GuusRaidBuilder:|r No preset selected.")
-            return
-        end
-        ShowExportFrame(name)
-    end)
+    exportBtn:SetScript("OnClick", GRB_ExportBtn_OnClick)
 
     -- [Import]
-    local importBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+    local importBtn = CreateFrame("Button", nil, ioGroup, "UIPanelButtonTemplate")
     importBtn:SetWidth(52); importBtn:SetHeight(20)
     importBtn:SetPoint("TOPLEFT", exportBtn, "TOPRIGHT", 3, 0)
     importBtn:SetText("Import")
-    importBtn:SetScript("OnClick", function()
-        ShowImportFrame()
-    end)
+    importBtn:SetScript("OnClick", GRB_ImportBtn_OnClick)
 
     -- [Stop] (hidden until executing)
-    local stopBtn = CreateFrame("Button", "GRBStopBtn", mainFrame)
+    local stopBtn = CreateFrame("Button", "GRBStopBtn", actionGroup)
     stopBtn:SetWidth(50); stopBtn:SetHeight(26)
-    stopBtn:SetPoint("TOPRIGHT", mainFrame, "TOPRIGHT", -35, TOP_Y - 2)
+    stopBtn:SetPoint("RIGHT", actionGroup, "RIGHT", 0, 0)
     stopBtn:SetBackdrop({
         bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -2533,14 +2944,16 @@ local function CreateMainGUI()
     stopTxt:SetPoint("CENTER", stopBtn, "CENTER", 0, 0)
     stopTxt:SetText("Stop")
     stopTxt:SetTextColor(1.0, 0.4, 0.4)
-    stopBtn:SetScript("OnClick", function() GRB_stopRequested = true end)
+    stopBtn:SetScript("OnClick", GRB_StopBtn_OnClick)
     stopBtn:Hide()
     GRB_stopButton = stopBtn
 
+    CreateExecuteStartButton(actionGroup, stopBtn)
+
     -- [Execute Raid] (gold button)
-    local execBtn = CreateFrame("Button", "GRBExecBtn", mainFrame)
+    local execBtn = CreateFrame("Button", "GRBExecBtn", actionGroup)
     execBtn:SetWidth(112); execBtn:SetHeight(26)
-    execBtn:SetPoint("TOPRIGHT", stopBtn, "TOPLEFT", -5, 0)
+    execBtn:SetPoint("TOPRIGHT", executeStartBtn, "TOPLEFT", -3, 0)
     execBtn:SetBackdrop({
         bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -2553,93 +2966,11 @@ local function CreateMainGUI()
     execTxt:SetPoint("CENTER", execBtn, "CENTER", 0, 0)
     execTxt:SetText("Execute Raid")
     execTxt:SetTextColor(1.0, 0.9, 0.1)
-    execBtn:SetScript("OnEnter", function() execBtn:SetBackdropColor(0.50, 0.40, 0.0, 0.95) end)
-    execBtn:SetScript("OnLeave", function() execBtn:SetBackdropColor(0.35, 0.27, 0.0, 0.95) end)
-    execBtn:SetScript("OnClick", function()
-        local name = GuusRaidBuilder_Config.currentPreset
-        if name then ExecuteRaid(name) end
-    end)
+    execBtn:SetScript("OnEnter", GRB_ExecBtn_OnEnter)
+    execBtn:SetScript("OnLeave", GRB_ExecBtn_OnLeave)
+    execBtn:SetScript("OnClick", GRB_ExecBtn_OnClick)
 
-    -- ===== SUMMARY BAR =====
-    summaryText = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    summaryText:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 15, TOP_Y - 28)
-    summaryText:SetText("No preset selected")
-    summaryText:SetTextColor(0.7, 0.7, 0.7)
-
-    -- Separator line
-    local sep = mainFrame:CreateTexture(nil, "BACKGROUND")
-    sep:SetWidth(WINDOW_WIDTH - 28); sep:SetHeight(1)
-    sep:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 13, TOP_Y - 50)
-    sep:SetTexture(0.35, 0.35, 0.45, 0.55)
-
-    local PANEL_TOP = TOP_Y - 54
-
-    -- ===== LEFT PANEL =====
-    local leftHdr = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    leftHdr:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 14, PANEL_TOP)
-    leftHdr:SetText("Accounts")
-    leftHdr:SetTextColor(0.92, 0.87, 0.45)
-
-    leftScrollFrame = CreateFrame("ScrollFrame", "GRBLeftScrollFrame", mainFrame, "UIPanelScrollFrameTemplate")
-    leftScrollFrame:SetWidth(LEFT_WIDTH - 5)
-    leftScrollFrame:SetHeight(SCROLL_HEIGHT)
-    leftScrollFrame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 13, PANEL_TOP - 18)
-    leftScrollFrame:EnableMouseWheel(true)
-    leftScrollFrame:SetScript("OnMouseWheel", function()
-        local d = arg1
-        if not d then return end
-        local sb = getglobal("GRBLeftScrollFrameScrollBar")
-        if sb then
-            local mn, mx = sb:GetMinMaxValues()
-            local cv = sb:GetValue()
-            if mn and mx and cv then sb:SetValue(math.min(mx, math.max(mn, cv - d * 28))) end
-        end
-    end)
-    leftScrollContent = CreateFrame("Frame", "GRBLeftScrollContent", leftScrollFrame)
-    leftScrollContent:SetWidth(LEFT_WIDTH - 25)
-    leftScrollContent:SetHeight(800)
-    leftScrollFrame:SetScrollChild(leftScrollContent)
-
-    -- Vertical separator
-    local vSep = mainFrame:CreateTexture(nil, "BACKGROUND")
-    vSep:SetWidth(1); vSep:SetHeight(SCROLL_HEIGHT + 20)
-    vSep:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", LEFT_WIDTH + 14, PANEL_TOP)
-    vSep:SetTexture(0.35, 0.35, 0.45, 0.50)
-
-    -- ===== RIGHT PANEL =====
-    local rightHdr = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    rightHdr:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", LEFT_WIDTH + 20, PANEL_TOP)
-    rightHdr:SetText("Raid Composition")
-    rightHdr:SetTextColor(0.92, 0.87, 0.45)
-
-    rightScrollFrame = CreateFrame("ScrollFrame", "GRBRightScrollFrame", mainFrame, "UIPanelScrollFrameTemplate")
-    rightScrollFrame:SetWidth(RIGHT_WIDTH - 5)
-    rightScrollFrame:SetHeight(SCROLL_HEIGHT)
-    rightScrollFrame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", LEFT_WIDTH + 19, PANEL_TOP - 18)
-    rightScrollFrame:EnableMouseWheel(true)
-    rightScrollFrame:SetScript("OnMouseWheel", function()
-        local d = arg1
-        if not d then return end
-        local sb = getglobal("GRBRightScrollFrameScrollBar")
-        if sb then
-            local mn, mx = sb:GetMinMaxValues()
-            local cv = sb:GetValue()
-            if mn and mx and cv then sb:SetValue(math.min(mx, math.max(mn, cv - d * 28))) end
-        end
-    end)
-    rightScrollContent = CreateFrame("Frame", "GRBRightScrollContent", rightScrollFrame)
-    rightScrollContent:SetWidth(RIGHT_WIDTH - 25)
-    rightScrollContent:SetHeight(2000)
-    rightScrollFrame:SetScrollChild(rightScrollContent)
-
-    -- Transfer button (bottom-left)
-    local transferBtn = CreateFrame("Button", "GRBTransferBtn", mainFrame, "UIPanelButtonTemplate")
-    transferBtn:SetWidth(90); transferBtn:SetHeight(22)
-    transferBtn:SetPoint("BOTTOMLEFT", mainFrame, "BOTTOMLEFT", 14, 12)
-    transferBtn:SetText("Transfer")
-    transferBtn:SetScript("OnClick", function()
-        SendChatMessage(".z transfer", "SAY")
-    end)
+    BuildMainPanels(TOP_Y)
 
     RefreshAll()
     mainFrame:Show()
