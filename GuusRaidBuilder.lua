@@ -241,6 +241,50 @@ local function trim(s)
     return s
 end
 
+local function FormatMoneyText(copper)
+    local amount = tonumber(copper) or 0
+    local negative = amount < 0
+    if negative then amount = -amount end
+
+    local gold = math.floor(amount / 10000)
+    local silver = math.floor(math.mod(amount, 10000) / 100)
+    local copperOnly = math.mod(amount, 100)
+    local text = gold .. "g " .. silver .. "s " .. copperOnly .. "c"
+
+    if negative then
+        return "-" .. text
+    end
+    return text
+end
+
+local function ReportExecuteMoneyChange(startMoney)
+    if type(GetMoney) ~= "function" then return end
+
+    local beforeMoney = tonumber(startMoney) or 0
+    local afterMoney = GetMoney() or beforeMoney
+    local delta = afterMoney - beforeMoney
+
+    if delta < 0 then
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cffffff00GuusRaidBuilder:|r Total cost " .. FormatMoneyText(-delta)
+            .. " (before " .. FormatMoneyText(beforeMoney)
+            .. ", after " .. FormatMoneyText(afterMoney) .. ")"
+        )
+    elseif delta > 0 then
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cffffff00GuusRaidBuilder:|r Total gain " .. FormatMoneyText(delta)
+            .. " (before " .. FormatMoneyText(beforeMoney)
+            .. ", after " .. FormatMoneyText(afterMoney) .. ")"
+        )
+    else
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cffffff00GuusRaidBuilder:|r No money change"
+            .. " (before " .. FormatMoneyText(beforeMoney)
+            .. ", after " .. FormatMoneyText(afterMoney) .. ")"
+        )
+    end
+end
+
 local SELF_SPAWN_TOKEN = "p:self"
 local GRBRightRows = {}
 
@@ -849,6 +893,7 @@ local function ExecuteRaid(presetName)
     local legacySlots = GetPresetLegacySlots(presetName)
     local spawnOrder, slotByToken = SyncSpawnOrder(presetName)
     local displayTotal = table.getn(spawnOrder)
+    local executeStartMoney = nil
     local startDisplayIndex = GetExecuteStartIndex(displayTotal)
     if startDisplayIndex > displayTotal then
         DEFAULT_CHAT_FRAME:AddMessage(
@@ -902,6 +947,12 @@ local function ExecuteRaid(presetName)
     GRB_executing     = true
     GRB_stopRequested = false
     if GRB_stopButton then GRB_stopButton:Show() end
+    if type(GetMoney) == "function" then
+        executeStartMoney = GetMoney() or 0
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cffffff00GuusRaidBuilder:|r Starting money " .. FormatMoneyText(executeStartMoney)
+        )
+    end
 
     local delay   = 500
     local index   = 0
@@ -920,6 +971,7 @@ local function ExecuteRaid(presetName)
                 stoppedAt = queuedDisplayIndices[index]
             end
             DEFAULT_CHAT_FRAME:AddMessage("|cffff6600GuusRaidBuilder:|r Stopped at " .. stoppedAt .. "/" .. displayTotal)
+            ReportExecuteMoneyChange(executeStartMoney)
             return
         end
         elapsed = elapsed + 1
@@ -938,6 +990,7 @@ local function ExecuteRaid(presetName)
                 if GRB_stopButton then GRB_stopButton:Hide() end
                 GRB_executeFrame:SetScript("OnUpdate", nil)
                 DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GuusRaidBuilder:|r Done! Sent " .. queueTotal .. " invites.")
+                ReportExecuteMoneyChange(executeStartMoney)
             end
         end
     end)
